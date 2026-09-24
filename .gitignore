@@ -221,3 +221,7 @@ __marimo__/
 
 docs
 resultados
+# Current Kaggle snapshot and local experiment outputs
+data/current/
+runs/
+reports/
