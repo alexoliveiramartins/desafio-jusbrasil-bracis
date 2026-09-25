@@ -47,12 +47,137 @@ PREFIXOS_EXTERNOS_RE = re.compile(
     r"AgInt\s+(?:no|na)\s+|"
     r"AgRg\s+no\s+|"
     r"EDs?\s+no\s+|"
+    r"processo\s+n[.º°o]?\s+TST-(?:[A-Z]{1,8}-)+|"
     r"processo\s+n[.º°o]?\s+|"
     r"A\."
     r")$",
     re.I,
 )
 
+PARTICULAS_NOME = {
+    "de", "da", "do", "dos", "das", "e"
+}
+
+
+def _parece_nome_proprio(token):
+    if not token:
+        return False
+
+    base = token.strip("'-")
+
+    if not base:
+        return False
+
+    return base[0].isupper()
+
+
+def _fim_nome_relator(trecho):
+    """
+    Localiza o fim do nome do relator em uma citação descritiva,
+    evitando consumir a prosa que vem depois.
+    """
+
+    marcador = re.search(
+        r"(?:relatoria\s+(?:de\s+)?|Rel\.\s+Min\.\s*)",
+        trecho,
+        re.I,
+    )
+
+    if not marcador:
+        return None
+
+    resto = trecho[marcador.end():]
+
+    tokens = list(
+        re.finditer(
+            r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’-]*",
+            resto
+        )
+    )
+
+    if (
+        not tokens
+        or not _parece_nome_proprio(tokens[0].group())
+    ):
+        return None
+
+    ultimo_fim = tokens[0].end()
+    i = 1
+
+    while i < len(tokens):
+        tok = tokens[i].group()
+        low = sem_acentos(tok)
+
+        if low in PARTICULAS_NOME:
+            # "de Mello", "DA SILVA", "dos Santos" etc.
+            # A partícula só entra se houver outro componente
+            # nominal depois dela.
+            if (
+                i + 1 < len(tokens)
+                and _parece_nome_proprio(
+                    tokens[i + 1].group()
+                )
+            ):
+                ultimo_fim = tokens[i + 1].end()
+                i += 2
+                continue
+
+            break
+
+        if _parece_nome_proprio(tok):
+            ultimo_fim = tokens[i].end()
+            i += 1
+            continue
+
+        # Primeira palavra comum em minúsculas:
+        # acabou o nome.
+        break
+
+    return marcador.end() + ultimo_fim
+
+def _distancia_edicao_ate_um(a, b):
+    """
+    Retorna True quando os tokens são iguais ou diferem
+    por no máximo uma inserção, remoção ou substituição.
+    """
+
+    a = sem_acentos(a)
+    b = sem_acentos(b)
+
+    if a == b:
+        return True
+
+    if abs(len(a) - len(b)) > 1:
+        return False
+
+    # Mesmo tamanho: no máximo uma substituição.
+    if len(a) == len(b):
+        return sum(
+            x != y
+            for x, y in zip(a, b)
+        ) <= 1
+
+    # Garante que a seja a string menor.
+    if len(a) > len(b):
+        a, b = b, a
+
+    i = 0
+    j = 0
+    erros = 0
+
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+        else:
+            erros += 1
+
+            if erros > 1:
+                return False
+
+            j += 1
+
+    return True
 
 def refinar_limites(texto, ini, fim, tipo):
     """
@@ -116,6 +241,45 @@ def refinar_limites(texto, ini, fim, tipo):
 
     if heading:
         fim = ini + heading.start()
+
+    # A regex das referências descritivas é deliberadamente
+    # permissiva para manter recall. Depois da detecção,
+    # delimitamos semanticamente o nome do relator.
+    if tipo == "jurisprudencia":
+        trecho = texto[ini:fim]
+
+        fim_nome = _fim_nome_relator(trecho)
+
+        if fim_nome is not None:
+            fim = ini + fim_nome
+
+
+    # Qualificadores normativos também podem sofrer OCR.
+    #
+    # Exemplo:
+    #   Constituição Fedcral
+    #
+    # A regex principal reconhece "Constituição"; se o token
+    # imediatamente seguinte estiver a apenas uma edição de
+    # "Federal", ele pertence ao mesmo span.
+    if (
+        tipo == "lei"
+        and "constituicao"
+        in sem_acentos(texto[ini:fim])
+    ):
+        prox = re.match(
+            r"\s+([A-Za-zÀ-ÿ]+)",
+            texto[fim:]
+        )
+
+        if (
+            prox
+            and _distancia_edicao_ate_um(
+                prox.group(1),
+                "Federal"
+            )
+        ):
+            fim += prox.end()
 
     # Whitespace e pontuação usados apenas para encerrar a frase
     # ficam fora do span canônico.
