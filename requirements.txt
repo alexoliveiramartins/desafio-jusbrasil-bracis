@@ -1,0 +1,4 @@
+# O pipeline (src/) usa só a biblioteca padrão do Python >= 3.10.
+# Estas dependências são para a avaliação local (kaggle_metric.py e tools/).
+pandas>=2.0
+numpy>=1.24

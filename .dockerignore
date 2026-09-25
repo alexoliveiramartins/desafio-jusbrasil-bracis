@@ -1,0 +1,5 @@
+# A imagem só precisa de src/ e da base canônica.
+*
+!src/
+!data/desafio1_bracis.db
+**/__pycache__/
