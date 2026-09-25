@@ -23,7 +23,6 @@ OCR_DIGITS = str.maketrans({"O":"0","o":"0","I":"1","l":"1","S":"5","s":"5","G":
 CONFIANCA_VALIDACAO = 1.0
 # Duplicidades residuais da cobertura congelada. O PDF informa que as citações
 # nunca apontam para a duplicata; este é o índice canônico de desempate.
-DESAMBIGUACAO={"2138520105020030":867328396,"795001620095150016":867273442,"258237820155240091":2813052232}
 
 def sem_acentos(s): return "".join(c for c in unicodedata.normalize("NFD",s) if unicodedata.category(c)!="Mn").lower()
 def inicio_corpo(texto):
@@ -90,23 +89,171 @@ def frase_fts(grupos): return '"'+" ".join(grupos)+'"' # split + frase exata exi
 def tribunal(t):
     m=re.search(r"\b(STF|STJ|TST|TSE|STM)\b",t,re.I); return m.group(1).upper() if m else None
 
-def validar_numero(c,t):
-    grupos=grupos_numero(t)
-    if not grupos:return []
-    rows=c.execute("SELECT d.* FROM documentos_fts f JOIN documentos d ON d.rowid=f.rowid WHERE documentos_fts MATCH ? AND d.natureza='acordao'",(frase_fts(grupos),)).fetchall()
-    if len(rows)==1:return rows
-    digitos="".join(grupos)
-    if digitos in DESAMBIGUACAO:
-        return [r for r in rows if r["id"]==DESAMBIGUACAO[digitos]]
-    limite=2500 if tribunal(t)=="TST" else 600
-    padrao=re.compile(r"(?<!\d)"+r"\D*".join(map(re.escape,grupos))+r"(?!\d)")
-    alvo=[r for r in rows if padrao.search(r["texto"][:limite].translate(OCR_DIGITS))]
-    if len(alvo)>1:
-        palavras={p for p in re.findall(r"[a-z]{4,}",sem_acentos(t.split(str(grupos[0]),1)[0])) if p not in {"numero"}}
-        notas=[(sum(p in sem_acentos(r["texto"][:180]) for p in palavras),r) for r in alvo]
-        melhor=max(n for n,_ in notas)
-        alvo=[r for n,r in notas if n==melhor]
-    tr=tribunal(t); return [r for r in alvo if not tr or r["tribunal"]==tr]
+def _candidatos_numero_principal(rows, grupos):
+    """
+    Identifica quais documentos parecem ser proprietários do número
+    processual, em vez de documentos que apenas o citam no corpo.
+    """
+    padrao = re.compile(
+        r"(?<!\d)"
+        + r"\D*".join(map(re.escape, grupos))
+        + r"(?!\d)"
+    )
+
+    candidatos = []
+
+    for r in rows:
+        original = r["texto"]
+
+        # A tradução é usada somente para comparar o número.
+        # Não usamos o texto traduzido para procurar expressões jurídicas,
+        # pois OCR_DIGITS transformaria letras de palavras em dígitos.
+        texto_numerico = original.translate(OCR_DIGITS)
+
+        for m in padrao.finditer(texto_numerico):
+            pos = m.start()
+
+            contexto_anterior = sem_acentos(
+                original[max(0, pos - 240):pos]
+            )
+
+            # STJ/TSE/STM e muitos outros documentos expõem
+            # o número principal logo no cabeçalho.
+            em_cabecalho = pos <= 500
+
+            # No TST uma ementa extensa pode vir antes do número
+            # principal. A fórmula abaixo é um marcador forte
+            # de identificação dos autos julgados.
+            em_formula_vistos = (
+                "vistos, relatados e discutidos estes autos"
+                in contexto_anterior
+            )
+
+            if em_cabecalho or em_formula_vistos:
+                # Cabeçalho explícito é a evidência preferida.
+                # A fórmula "Vistos..." funciona como fallback.
+                prioridade = (
+                    0 if em_cabecalho else 1,
+                    pos
+                )
+
+                candidatos.append((prioridade, r))
+                break
+
+    if not candidatos:
+        return []
+
+    melhor = min(
+        prioridade
+        for prioridade, _ in candidatos
+    )
+
+    return [
+        r
+        for prioridade, r in candidatos
+        if prioridade == melhor
+    ]
+
+def validar_numero(c, t):
+    grupos = grupos_numero(t)
+
+    if not grupos:
+        return []
+
+    rows = c.execute(
+        """
+        SELECT d.*
+        FROM documentos_fts f
+        JOIN documentos d ON d.rowid = f.rowid
+        WHERE documentos_fts MATCH ?
+          AND d.natureza = 'acordao'
+        """,
+        (frase_fts(grupos),)
+    ).fetchall()
+
+    tr = tribunal(t)
+
+    # Quando a própria citação informa o tribunal,
+    # elimine documentos de outros tribunais antes
+    # de qualquer desempate.
+    if tr:
+        rows = [
+            r for r in rows
+            if r["tribunal"] == tr
+        ]
+
+    if len(rows) <= 1:
+        return rows
+
+    # Primeiro tenta identificar qual registro é dono
+    # do número processual.
+    principais = _candidatos_numero_principal(
+        rows,
+        grupos
+    )
+
+    if len(principais) == 1:
+        return principais
+
+    # Se mais de um ainda parecer principal,
+    # restringimos o universo antes do fallback.
+    if len(principais) > 1:
+        rows = principais
+
+    # Fallback conservador para formatos de documento
+    # ainda não cobertos pela detecção estrutural acima.
+    limite = 2500 if tr == "TST" else 600
+
+    padrao = re.compile(
+        r"(?<!\d)"
+        + r"\D*".join(map(re.escape, grupos))
+        + r"(?!\d)"
+    )
+
+    alvo = [
+        r
+        for r in rows
+        if padrao.search(
+            r["texto"][:limite].translate(OCR_DIGITS)
+        )
+    ]
+
+    if len(alvo) > 1:
+        palavras = {
+            p
+            for p in re.findall(
+                r"[a-z]{4,}",
+                sem_acentos(
+                    t.split(str(grupos[0]), 1)[0]
+                )
+            )
+            if p not in {"numero"}
+        }
+
+        notas = [
+            (
+                sum(
+                    p in sem_acentos(r["texto"][:180])
+                    for p in palavras
+                ),
+                r
+            )
+            for r in alvo
+        ]
+
+        melhor = max(
+            nota
+            for nota, _ in notas
+        )
+
+        alvo = [
+            r
+            for nota, r in notas
+            if nota == melhor
+        ]
+
+    return alvo
+
 def validar_sumula(c,t):
     m=re.search(r"(?:(?:Súmula|5úmula)(?:\s+Vinculante)?|Súm\.)\s+(?:n[.º°o]?\s*)?([0-9OlISG]+)",t,re.I)
     n="".join(re.findall(r"\d",m.group(1).translate(OCR_DIGITS))) if m else ""
