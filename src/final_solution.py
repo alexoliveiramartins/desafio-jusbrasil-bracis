@@ -32,6 +32,102 @@ def inicio_corpo(texto):
         pos += len(linha)
     return 0
 
+
+UFS_BR = {
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO",
+    "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI",
+    "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
+}
+
+PREFIXOS_EXTERNOS_RE = re.compile(
+    r"(?:"
+    r"EDcl\s+no\s+AgInt\s+no\s+|"
+    r"AgInt\s+nos?\s+EDcl\s+no\s+|"
+    r"Agravo\s+Interno\s+no\s+|"
+    r"AgInt\s+(?:no|na)\s+|"
+    r"AgRg\s+no\s+|"
+    r"EDs?\s+no\s+|"
+    r"processo\s+n[.º°o]?\s+|"
+    r"A\."
+    r")$",
+    re.I,
+)
+
+
+def refinar_limites(texto, ini, fim, tipo):
+    """
+    Canonicaliza somente as fronteiras superficiais da citação.
+
+    O texto original nunca é modificado. inicio/fim continuam sendo
+    offsets diretamente sobre o documento de entrada.
+    """
+
+    # Prefixos imediatamente adjacentes como:
+    #
+    #   AgInt no Recurso Especial...
+    #   AgRg no Rec. Esp...
+    #   EDcl no AgInt no Recurso Especial...
+    #
+    # fazem parte da superfície da citação.
+    #
+    # Repetimos porque podem existir cadeias de recursos.
+    if tipo == "jurisprudencia":
+        for _ in range(4):
+            janela_ini = max(0, ini - 80)
+            anterior = texto[janela_ini:ini]
+
+            m = PREFIXOS_EXTERNOS_RE.search(anterior)
+
+            if not m:
+                break
+
+            ini = janela_ini + m.start()
+
+    # NUM aceita letras que podem representar dígitos após OCR.
+    #
+    # Em casos como:
+    #
+    #   ... - SC
+    #
+    # ele pode consumir o S como parte do número e deixar o C fora.
+    # Se o caractere imediatamente seguinte completa uma UF brasileira,
+    # estendemos a fronteira por um caractere.
+    if tipo == "jurisprudencia" and ini < fim < len(texto):
+        par = texto[fim - 1:fim + 1].upper()
+
+        if par in UFS_BR:
+            fim += 1
+
+    # A tolerância do NUM a espaços, quebras e letras OCR pode fazê-lo
+    # atravessar uma quebra de parágrafo e começar a consumir headings:
+    #
+    #   ...0091.
+    #
+    #   III — DOS PRECEDENTES
+    #
+    # Uma quebra dupla seguida de numeral romano sinaliza o início
+    # de uma nova seção, não a continuação da referência.
+    trecho = texto[ini:fim]
+
+    heading = re.search(
+        r"\.\s*\n\s*\n(?=[IVXLCDM])",
+        trecho
+    )
+
+    if heading:
+        fim = ini + heading.start()
+
+    # Whitespace e pontuação usados apenas para encerrar a frase
+    # ficam fora do span canônico.
+    while fim > ini and texto[fim - 1].isspace():
+        fim -= 1
+
+    while fim > ini and texto[fim - 1] in ".,;:":
+        fim -= 1
+
+    return ini, fim
+
+
 def extrair(texto):
     achados=[]
     for tipo,rx in (
@@ -51,8 +147,15 @@ def extrair(texto):
         achados,
         key=lambda x:(x[0],-(x[1]-x[0]))
     ):
+        ini, fim = refinar_limites(
+            texto,
+            ini,
+            fim,
+            tipo
+        )
+
         if not any(
-            ini < x["fim"] and fim > x["inicio"]
+            ini<x["fim"] and fim>x["inicio"]
             for x in saida
         ):
             saida.append({
