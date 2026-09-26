@@ -27,6 +27,7 @@ from .normalize import (
     diploma_key,
     expand_abbreviation,
     fold,
+    LEGAL_VOCABULARY,
     LEXICON,
     is_number_marker,
     name_tokens,
@@ -54,12 +55,27 @@ ODD_SPACE = {"\u00a0", "\u2009", "\u202f", "\u2007", "\t", "\x0c"}  # NBSP, thin
 HYPHEN_BREAK = re.compile(r"(?<=[A-Za-zÀ-ÿ])-[ \t]*(?:\r?\n[ \t]*){1,2}(?=[A-Za-zÀ-ÿ])")
 
 
-def clean(text: str) -> tuple[str, list[int]]:
-    """(texto limpo, mapa) onde mapa[i] = posição no original do caractere i."""
+def clean(text: str, words: frozenset[str] = frozenset()) -> tuple[str, list[int]]:
+    """(texto limpo, mapa) onde mapa[i] = posição no original do caractere i.
+
+    `words` (tokens de nomes da base, já com fold) reforça o vocabulário usado
+    para juntar palavras partidas ("Anto nio") e separar nomes colados.
+    """
+    # 0. Mojibake (UTF-8 lido como cp1252/latin-1) volta a ser um caractere, que
+    #    aponta para o início da sequência; a numeração de linha da margem sai.
+    chars: list[tuple[str, int]] = []
+    pos = 0
+    for m in MOJIBAKE.finditer(text):
+        chars += [(c, i) for i, c in enumerate(text[pos:m.start()], pos)]
+        chars.append((MOJIBAKE_MAP[m.group()], m.start()))
+        pos = m.end()
+    chars += [(c, i) for i, c in enumerate(text[pos:], pos)]
+    margin = _margin_numbers(text)
     # 1. Invisíveis saem primeiro: "Recu-\n\u200brso" só vira hifenização
     #    reconhecível depois disso.
-    kept = [i for i, ch in enumerate(text) if ch not in INVISIBLE]
-    visible = "".join(text[i] for i in kept)
+    kept = [i for c, i in chars if c not in INVISIBLE and i not in margin]
+    by_pos = dict((i, c) for c, i in chars)
+    visible = "".join(by_pos[i] for i in kept)
     # 2. Hifenização de fim de linha: posições (no texto visível) a pular.
     skip = set()
     for m in HYPHEN_BREAK.finditer(visible):
@@ -80,21 +96,144 @@ def clean(text: str) -> tuple[str, list[int]]:
         mapping.append(i)
         prev = ch
     mapping.append(len(text))  # posição de fim
-    return _split_glued_markers("".join(out), mapping)
+    cleaned, mapping = _join_split_words("".join(out), mapping, words)
+    for _ in range(3):  # um corte pode expor outro: "oREspnº" -> "o REspnº" -> "o REsp nº"
+        size = len(cleaned)
+        cleaned, mapping = _split_glued(cleaned, mapping, words)
+        if len(cleaned) == size:
+            break
+    return cleaned, mapping
+
+
+# UTF-8 decodificado como cp1252 ou latin-1: "ção" -> "Ã§Ã£o", "nº" -> "nÂº", "—" -> "â€”".
+# As sequências começam por Â/Ã/Ä/Å/â seguidas de símbolos que não vêm depois dessas
+# letras em português. Ficam de fora as que continuam com espaço, travessão ou aspas:
+# "DÃ\xa0RELATORIA" é "DA" com OCR, não "à"; "IRMÃ”" é palavra entre aspas.
+_MOJIBAKE_AMBIGUOUS = set("\xa0 –—‘’“”")
+
+
+def _mojibake_map() -> dict[str, str]:
+    table = {}
+    for ch in [chr(c) for c in range(0xA0, 0x180)] + list("–—‘’“”•…€"):
+        raw = ch.encode("utf-8")
+        for codec in ("cp1252", "latin-1"):
+            try:
+                seq = raw.decode(codec)
+            except UnicodeDecodeError:
+                continue
+            if len(seq) > 1 and not _MOJIBAKE_AMBIGUOUS & set(seq[1:]):
+                table.setdefault(seq, ch)
+    return table
+
+
+MOJIBAKE_MAP = _mojibake_map()
+MOJIBAKE = re.compile("|".join(re.escape(k) for k in sorted(MOJIBAKE_MAP, key=len, reverse=True)))
+
+# Numeração de linha na margem ("  12  texto"): só quando o documento inteiro
+# a usa (5+ linhas, números crescentes); "1.  Dos fatos" não casa (tem ponto).
+_MARGIN_NUMBER = re.compile(r"(?m)^[ \t]*(\d{1,3})(?:[ \t]{2,}|\t)")
+
+
+def _margin_numbers(text: str) -> set[int]:
+    found = list(_MARGIN_NUMBER.finditer(text))
+    if len(found) < 5:
+        return set()
+    numbers = [int(m.group(1)) for m in found]
+    rising = sum(b > a for a, b in zip(numbers, numbers[1:]))
+    if rising < 0.8 * (len(numbers) - 1):
+        return set()
+    return {i for m in found for i in range(m.start(1), m.end(1))}
 
 
 # Marcador de número colado aos dígitos: "n233", "no233", "nº233", "numero233". Exige 2+
 # dígitos: "n0 REsp" é o "no" com OCR, não o processo nº 0.
 GLUED_MARKER = re.compile(r"(?<![A-Za-zÀ-ÿ])(?:n[º°o.]?|n\.º|nr\.?|nro\.?|n[uú]m\.?|n[uú]mero)(?=\d\d)", re.IGNORECASE)
 
+# Espaço perdido na digitalização ("noARESP", "doart.", "REsp1.664", "443do").
+# Cada padrão casa até o ponto onde falta o espaço; só fronteiras inequívocas:
+# conector minúsculo antes de maiúscula/dígito/palavra-chave, sigla ou classe
+# antes de número, número antes de conector, tribunal antes de minúscula.
+_CONN1 = r"(?:o|a|e|à)"
+_CONN2 = r"(?:aos|ao|os|as|nos|nas|no|na|dos|das|do|da|de|em|pelos|pelas|pelo|pela|sob)"
+# Depois de conector de uma letra, só uma sigla/classe inteira conhecida ("aRcl", "oRHC"):
+# "aGrG", "eSPECIAL" são palavras com a caixa trocada, não "a GrG".
+_UPPER_FORMS = "|".join(sorted((
+    "AR", "AI", "RE", "RO", "RR", "HC", "MS", "ED", "EDcl", "AgR", "AgRg", "AgInt", "REsp", "AREsp", "REspe",
+    "RHC", "RMS", "Rcl", "Recl", "APL", "RSE", "STF", "STJ", "TST", "TSE", "STM", "CPC", "CPP", "CF", "CLT",
+    "CDC", "Recurso", "Agravo", "Súmula", "Reclamação", "Lei", "Constituição", "Código", "Tema", "Embargos",
+    "Habeas", "Apelação", "Suspensão", "Mandado", "Processo"), key=len, reverse=True))
+_LEFT_KEYWORDS = (r"(?:art|artigos?|s[uú]mulas?|precedentes?|julgados?|ac[oó]rd[aã]os?|recursos?|agravos?"
+                  r"|reclama[cç][aã]o|lei|processo|embargos|habeas|apela[cç][aã]o|tema)")
+_RIGHT_KEYWORDS = (r"(?:a?resp|a?respe|agresp|are|re|rcl|recl|rhc|rms|apl|hc|ar|ai|ro|rr|arr|airr|rse|agint|agrg"
+                   r"|agr|edcl|ed|eds|especial|eleitoral|extraordin[aá]rio|ordin[aá]rio|vinculante|s[uú]mulas?"
+                   r"|artigo|art|lei|tema|reclama[cç][aã]o|agravo|interno|regimental|instrumento|corpus"
+                   r"|seguran[cç]a|criminal|apela[cç][aã]o)")
+_NOT_LETTER = r"(?![A-Za-zÀ-ÿ])"
+_START = r"(?<![A-Za-zÀ-ÿ\d])"
+GLUE_POINTS = [
+    GLUED_MARKER,
+    re.compile(rf"{_START}(?-i:{_CONN2})(?=[A-ZÀ-Ý][A-Za-zÀ-ÿ])"),                        # "noARESP", "doSTJ"
+    re.compile(rf"{_START}(?-i:{_CONN1})(?=(?:{_UPPER_FORMS})(?:{_NOT_LETTER}|n[º°.]))", re.IGNORECASE),  # "aRcl"
+    re.compile(rf"{_START}(?-i:{_CONN2})(?=\d)"),                                        # "de2023", "na5úmula"
+    re.compile(rf"{_START}(?-i:{_CONN1}|{_CONN2})(?={_LEFT_KEYWORDS}{_NOT_LETTER})", re.IGNORECASE),  # "doart."
+    # Sigla/classe antes de número com 2+ dígitos: "REsp1.664", "Vinculante10"; "Re1." é "Rel.".
+    re.compile(rf"(?<![A-Za-zÀ-ÿ]){_RIGHT_KEYWORDS}"
+               rf"(?=\d[\d.,]*\d(?![A-Za-zÀ-ÿ\d])|n[º°.]\s*\d)", re.IGNORECASE),
+    # Número (não colado a letra) antes de conector: "443do", "2016sob"; "Reg1na" é nome.
+    re.compile(rf"{_START}\d[\d.,/\-–]*\d(?=(?-i:dos|das|do|da|de|sob|em|nos|nas|no|na|pelo|pela|d0){_NOT_LETTER})"),
+    re.compile(r"(?<![A-Za-zÀ-ÿ])(?-i:[S5]T[FJM]|T[S5][TE])(?=[a-zà-ÿ]{2,})"),           # "STJproferido"
+]
+# Palavras que, partidas por um espaço ("Suspe nsão", "julg ado"), são reunidas.
+_JOIN_EXTRA = {"precedente", "acordao", "decisao", "liminar", "sentenca", "suspensao", "reclamacao"}
 
-def _split_glued_markers(text: str, mapping: list[int]) -> tuple[str, list[int]]:
-    """Insere um espaço entre marcador e número; o espaço aponta para o 1º dígito no original."""
+
+def _join_split_words(text: str, mapping: list[int], words: frozenset[str]) -> tuple[str, list[int]]:
+    """Remove o espaço de "Suspe nsão" quando a junção é palavra jurídica ou nome da base
+    e nenhuma das metades é palavra sozinha."""
+    vocab = words | _JOIN_EXTRA | set(LEGAL_VOCABULARY)
+    tokens = list(re.finditer(r"[A-Za-zÀ-ÿ]+", text))
+    drop = set()
+    for a, b in zip(tokens, tokens[1:]):
+        if text[a.end():b.start()] != " " or a.start() in drop:
+            continue
+        fa, fb = fold(a.group()), fold(b.group())
+        if len(fa) < 2 or len(fb) < 2 or fa in vocab or fb in vocab or fa in CONNECTORS or fb in CONNECTORS:
+            continue
+        if fa + fb in vocab:
+            drop.add(a.end())
+    if not drop:
+        return text, mapping
+    keep = [i for i in range(len(text)) if i not in drop]
+    return "".join(text[i] for i in keep), [mapping[i] for i in keep] + [mapping[-1]]
+
+
+def _glued_names(text: str, words: frozenset[str]) -> list[int]:
+    """Pontos de corte em nomes colados da base: "CarlosFerreira", "AUGUSTOAMARAL"."""
+    points = []
+    if not words:
+        return points
+    for m in re.finditer(r"[A-Za-zÀ-ÿ]{8,}", text):
+        w = fold(m.group())
+        if w in words or w in LEGAL_VOCABULARY:
+            continue
+        for i in range(4, len(w) - 3):
+            if w[:i] in words and w[i:] in words:
+                points.append(m.start() + i)
+                break
+    return points
+
+
+def _split_glued(text: str, mapping: list[int], words: frozenset[str] = frozenset()) -> tuple[str, list[int]]:
+    """Insere um espaço em cada ponto de colagem; o espaço aponta para o caractere seguinte no original."""
+    points = {m.end() for rx in GLUE_POINTS for m in rx.finditer(text) if 0 < m.end() < len(text)}
+    points.update(_glued_names(text, words))
     out, new_map, pos = [], [], 0
-    for m in GLUED_MARKER.finditer(text):
-        out.append(text[pos:m.end()] + " ")
-        new_map += mapping[pos:m.end()] + [mapping[m.end()]]
-        pos = m.end()
+    for p in sorted(points):
+        if text[p - 1].isspace() or text[p].isspace():
+            continue
+        out.append(text[pos:p] + " ")
+        new_map += mapping[pos:p] + [mapping[p]]
+        pos = p
     out.append(text[pos:])
     new_map += mapping[pos:]
     return "".join(out), new_map
@@ -115,18 +254,22 @@ def to_original(mapping: list[int], start: int, end: int) -> tuple[int, int]:
 
 FLAGS = re.IGNORECASE | re.VERBOSE
 
-# Trocas típicas de OCR em palavras-chave ("5úmula", "Fedcral", "profcrido").
-# Só é aplicado a literais fixos, nunca a nomes de relatores.
+# Trocas típicas de OCR em palavras-chave ("5úmula", "Fedcral", "profcrido",
+# "Súmulo", "Súmnla", "Milifar", "Códiqo"). Só é aplicado a literais fixos,
+# nunca a nomes de relatores.
 CONFUSABLE = {
-    "s": "s5", "e": "eéêc", "a": "aáàâã", "i": "iíl1", "o": "oóôõ0",
-    "u": "uú", "c": "cçe", "l": "l1i", "ç": "çc", "ã": "ãaâ", "é": "éec",
+    "s": "s5", "e": "eéêc", "a": "aáàâão", "i": "iíl1", "o": "oóôõ0a",
+    "u": "uún", "c": "cçe", "l": "l1i", "ç": "çc", "ã": "ãaâ", "é": "éec",
     "í": "íil", "ó": "óo", "ú": "úu", "ê": "êe", "â": "âa", "õ": "õo",
+    "t": "tf", "f": "ft", "g": "gq",
 }
+# Uma letra lida como duas (ou o contrário): "rn" por "m", "ri" por "n", "cl" por "d", "li" por "h".
+SPLIT_CONFUSABLE = {"m": "(?:m|rn)", "n": "(?:[nu]|ri)", "d": "(?:d|cl)", "h": "(?:h|b|li)"}
 
 
 def _ocr_char(ch: str) -> str:
-    if ch.lower() == "m":
-        return "(?:m|rn)"  # "Súrnula", "ern"
+    if ch.lower() in SPLIT_CONFUSABLE:
+        return SPLIT_CONFUSABLE[ch.lower()]
     if ch.lower() in CONFUSABLE:
         return f"[{CONFUSABLE[ch.lower()]}]"
     return re.escape(ch)
@@ -136,35 +279,40 @@ def ocr(phrase: str) -> str:
     """Regex tolerante a OCR para uma expressão literal (espaços viram \\s+)."""
     return r"\s+".join("".join(_ocr_char(ch) for ch in word) for word in phrase.split())
 
-NUMBER_MARKER = r"(?:n(?:\.\s*[º°o0]|[º°o0.])?\s*)?"
+# "nº" com OCR: "n°", "no", "n0"; e, só com o sinal ou o ponto, "riº" e "uº"/"u.".
+NUMBER_MARKER = r"(?:(?:n(?:\.\s*[º°o0]|[º°o0.])?|(?:u|ri)(?:\.\s*[º°o0]|[º°.]))\s*)?"
 UF = r"(?:AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)"
 # Siglas de tribunal com S lido como 5 ("T5T", "5TF").
 TRIBUNAL = r"(?:[S5]T[FJM]|T[S5][TE])"
 # Mantém os tamanhos dos blocos CNJ, aceitando separadores ausentes,
 # repetidos ou substituídos por espaços. Não altera nenhum dígito.
 CNJ_SEPARATOR = r"[\s.\-–/]*"
-_D = r"[\dOolISgGBL]"
+# Letras que o OCR troca por dígitos: as mesmas que normalize.OCR_DIGITS converte
+# (os padrões rodam com IGNORECASE, então "S" também cobre "s", "B" cobre "b" etc.).
+# "|" só vale sozinho: "|||" é fio de tabela ou de página, não "111".
+_D = r"(?:[\dOolISgGBLDQZ]|(?<!\|)\|(?!\|))"
 CNJ_NUMBER = CNJ_SEPARATOR.join((
-    rf"(?<![A-Za-zÀ-ÿ])(?:[OolIGSB]{{0,3}}\d|[lIOGSB](?=\d)){_D}{{0,6}}", rf"{_D}{{2}}", rf"{_D}{{4}}", _D, rf"{_D}{{2}}", rf"{_D}{{4}}"
+    rf"(?<![A-Za-zÀ-ÿ])(?:[OolIGSBDQZ|]{{0,3}}\d|[lIOGSBDQZ|](?=\d)){_D}{{0,6}}", rf"{_D}{{2}}", rf"{_D}{{4}}", _D, rf"{_D}{{2}}", rf"{_D}{{4}}"
 ))
-SHORT_NUMBER = r"\d+(?:\s*\.\s*\d+)*"
+# Número de lei, com OCR a partir do 2º caractere ("g.504" também: 1º seguido de ".").
+SHORT_NUMBER = rf"(?:\d|[lIOSgQZ|](?=[\d.]))[\dOolISgGBQZ|]*(?:\s*\.\s*[\dOolISgGBQZ|]+)*"
 # Espaços entre milhares são aceitos só em grupos de três dígitos.
 # O formato de leis permanece separado para não ampliar essa família.
 # Dígitos podem vir trocados por letras parecidas ("21737l8", "1.528.4S5");
 # o primeiro caractere precisa ser um dígito real.
-OCR_DIGIT = r"[\dOolISgGBL]"
+OCR_DIGIT = _D
 # O número nunca começa colado numa letra: "n0" (OCR de "no") não é o nº 0.
 PROCESS_SHORT_NUMBER = (
-    rf"(?<![A-Za-zÀ-ÿ])(?:(?:\d|[lILBGSO](?=\d)|[lIL](?=[.\s]\s*[\dOolISgGBL])){OCR_DIGIT}{{0,2}}"
+    rf"(?<![A-Za-zÀ-ÿ])(?:(?:\d|[lILBGSOQZ|](?=\d)|[lIL|](?=[.\s]\s*{OCR_DIGIT})){OCR_DIGIT}{{0,2}}"
     rf"(?:\s*[.\s][\s\-–]*{OCR_DIGIT}{{3}}(?:{OCR_DIGIT}{{3}})?|\s*[\-–]\s*\.\s*{OCR_DIGIT}{{3}}|,{OCR_DIGIT}{{3}}(?!\d))+"
-    rf"|(?:\d|[lILBGSO](?=\d)){OCR_DIGIT}*)"
+    rf"|(?:\d|[lILBGSOQZ|](?=\d)){OCR_DIGIT}*)"
 )
 PROCESS_NUMBER = rf"(?:{CNJ_NUMBER}|{PROCESS_SHORT_NUMBER})"
 # Não aceita um prefixo numérico se outro bloco de dígitos vem após ponto
 # ou hífen. Ex.: um OCR não suportado em 1.234.56g não deve virar só 1.234.
 # Também recusa parar antes de ",ddd": "87,101" não pode virar o processo 87.
 # Ano com OCR nos dígitos ("201g", "20l7").
-YEAR = r"(?:19|2[0O])[\dOolIgSB]{2}(?!\w)"
+YEAR = r"(?:19|[2Z][0OD])[\dOolIgSBDQZ|]{2}(?!\w)"
 # "-5P" é a UF SP com OCR, não continuação do número.
 NUMBER_END = r"(?!\w)(?!\s*[.\-–]\s*(?!(?-i:5[A-Z])\b)\d)(?!,\d)"
 STATE_SUFFIX = rf"(?:\s*(?:[/–-]\s*{UF}\b|\({UF}\)))?"
@@ -185,7 +333,9 @@ CLASS_NAMES = [
 ]
 PROCESS_CLASS = rf"""(?:
     {ocr_alternatives(CLASS_NAMES)}
-    | Recl | Rcl | Rec\.\s*Esp\.
+    | Recl | Rcl
+    # "Rcl" com OCR ("Rel", "Rc1", "RecI", "Rd"), só quando um número vem em seguida
+    | R(?-i:e?[ce][l1I|]|d)(?=\.?\s+(?:(?:n|u|ri)[º°.]?\s*)?(?:\d|[lIOGSBQZ|]\d)) | Rec\.\s*Esp\.
     | AREspE[Il1] | AgREsp | A\.?REsp | REspe | R\.?Esp | RHC | RMS | ARE | RE | RO
     | H\.?C | AR | AI | APL | RSE | R-Rp | Ag\.?\s*Int
 )"""
@@ -194,9 +344,12 @@ APPEAL_PREFIX = rf"""(?:
     Ag\.?\s*Int\.? | AgRg | AgR | EDcl | EDs | EDv | ED | PExt | AG\.REG\.?
     | {ocr_alternatives(APPEAL_NAMES)}
 )"""
+# Recursos repetidos do STF: "Terceiro AG.REG na Rcl", "Segundos EDcl no AgR".
+# Só entra antes de um prefixo recursal; sozinho, é prosa ("segundo o STJ").
+APPEAL_ORDINAL = r"(?:Primeir|Segund|Terceir|Quart|Quint|Sext)[oa]s?\s+"
 
 PROCESSOS = re.compile(
-    rf"\b(?:{APPEAL_PREFIX}(?:\s+n[oa0ã]s?\s+|\s*-\s*))*"
+    rf"\b(?:(?:{APPEAL_ORDINAL})?(?:{APPEAL_PREFIX}(?:\s+n[oa0ã]s?\s+|\s*-\s*))+)?"
     rf"{PROCESS_CLASS}\.?\s+{NUMBER_MARKER}{PROCESS_NUMBER}{NUMBER_END}{STATE_SUFFIX}",
     FLAGS,
 )
@@ -209,7 +362,9 @@ PROCESSOS_TRABALHISTAS = re.compile(
     FLAGS,
 )
 
-SUMULA_NUMBER = rf"{NUMBER_MARKER}(?:\d|[lIBgGS](?=\d)){OCR_DIGIT}*\b"
+# O 1º caractere pode ser letra de OCR se um dígito real vem logo depois ("SO6", "G7B").
+# "D" nunca abre número: "d0" é o "do" com OCR ("Súmula d0 STJ"), como "n0" é o "no".
+SUMULA_NUMBER = rf"{NUMBER_MARKER}(?:\d|[lIBgGSOQZ|](?={OCR_DIGIT}{{0,2}}\d)){OCR_DIGIT}*(?![\w|])"
 SUMULAS = re.compile(
     rf"""(?<!\w)(?:
         # "Súmula 83 do STJ", "Súmula Vinculante 10", "Súmula nº 83/STJ"
@@ -237,13 +392,14 @@ LAW_NUMBER = (
     rf"(?:{ocr('Lei')}\s+(?:{ocr('Complementar')}\s+)?|LC\s+)"
     rf"{NUMBER_MARKER}{SHORT_NUMBER}\s*/\s*{YEAR}"
 )
-ARTICLE_NUMBER = r"(?:\d|[lISLBg](?=[\dº°OolIgGSB]))[\dOolIgGSB]*(?:\.\d+)*(?:[º°o])?(?:-[A-Z])?"
+ARTICLE_NUMBER = (r"(?:\d|[lISLBgQZ|](?=[\dº°OolIgGSBDQZ|]))[\dOolIgGSBDQZ|]*"
+                  r"(?:\.[\dOolIgGSBDQZ|]+)*(?:[º°o])?(?:-[A-Z])?")
 PARAGRAPH = rf"§\s*{ARTICLE_NUMBER}|parágrafo\s+único"
 INCISO = r"(?:inciso\s+)?[IVXLCDM]+\b"
 ALINEA = r"(?:alínea\s+)?['\"‘’][a-z]['\"‘’]"
 
 ARTIGOS = re.compile(
-    rf"\b(?:{ocr('artigo')}|art\.?)\s+{ARTICLE_NUMBER}"
+    rf"\b(?:{ocr('artigo')}|{ocr('art')}\.?)\s+{ARTICLE_NUMBER}"
     rf"(?:\s*,\s*(?:{PARAGRAPH}|{INCISO}|{ALINEA}))*"
     rf"\s*,?\s*d[oaã0]\s+(?:{LAW_NUMBER}|{DIPLOMA})(?!\w)",
     FLAGS,
@@ -252,7 +408,7 @@ ARTIGOS = re.compile(
 
 # Ordem invertida: "CLT, art. 818", "Constituição Federal, artigo 5º, LV".
 ARTIGOS_INVERTIDOS = re.compile(
-    rf"\b(?:{DIPLOMA}),\s*(?:{ocr('artigo')}|art\.?)\s+{ARTICLE_NUMBER}"
+    rf"\b(?:{DIPLOMA}),\s*(?:{ocr('artigo')}|{ocr('art')}\.?)\s+{ARTICLE_NUMBER}"
     rf"(?:\s*,\s*(?:{PARAGRAPH}|{INCISO}|{ALINEA}))*(?!\w)",
     FLAGS,
 )
@@ -369,7 +525,7 @@ def courts_in(text: str) -> list[str]:
 
 _CNJ_ANCHOR = CNJ_NUMBER.replace(r"[\s.\-–]*", r"[\s.\-–/]*")
 NUMBER_RE = re.compile(rf"(?:{_CNJ_ANCHOR}|{PROCESS_SHORT_NUMBER}){NUMBER_END}", re.IGNORECASE)
-_YEAR = r"(?:19|2[0O])[\dOolIgSBL]{2}"
+_YEAR = r"(?:19|[2Z][0OD])[\dOolIgGSsBbLDQqZz|]{2}"
 # Ponto final depois do ano é fim de frase; ponto + dígito é bloco de CNJ ("2015.5.03").
 YEAR_ALONE = re.compile(rf"(?<![\w/.\-]){_YEAR}(?![\w/\-]|\.\d)")
 # Ano dentro de data: "10/10/2020", "07-05-2020", "11.09.2010", "10/2024".
@@ -656,7 +812,8 @@ _SUMULA_CUE = re.compile(
     re.IGNORECASE,
 )
 _GAP_WORDS = {"vinculante", "sumula", "sumular", "de", "da", "do"}
-_SUMULA_NUM = re.compile(r"(?<![\w.])(?:\d|[lIBgGS](?=[\dOolISgGB]{0,3}\d))[\dOolISgGB]{0,3}(?![\w])")
+_SUMULA_NUM = re.compile(r"(?<![\w.])(?:\d|[lIBgGSOQZ|](?=[\dOolISsgGBbDQqZz|]{0,3}\d))"
+                         r"[\dOolISsgGBbDQqZz|]{0,3}(?![\w|])")
 
 
 def _sumula_gap_ok(gap: str) -> bool:
@@ -695,7 +852,7 @@ def _sumula_anchors(text: str, taken: list[tuple[int, int]]) -> list[dict]:
 
 
 _ART_CUE = re.compile(
-    rf"(?<!\w)(?:{ocr('artigo')}s?|[aáàâã]rts?\.?)[\s.\-–]*(?:n[º°o.]*\s*)?(?P<num>{ARTICLE_NUMBER})",
+    rf"(?<!\w)(?:{ocr('artigo')}s?|[aáàâão]r[tf]s?\.?)[\s.\-–]*(?:n[º°o.]*\s*)?(?P<num>{ARTICLE_NUMBER})",
     re.IGNORECASE,
 )
 # Enumeração depois do número: "caput", "inciso LV", "incisos I a III", "§§ 1º e 2º",
@@ -703,8 +860,8 @@ _ART_CUE = re.compile(
 _ENUM_ITEM = (
     rf"(?:{ocr('caput')}"
     rf"|(?:{ocr('incisos')}|{ocr('inciso')}|incs?\.)\s*(?:{_ROMAN}|(?-i:[ivxlc]+)\b)"
-    rf"|{_ROMAN}"
-    rf"|§§?\s*[\dlI]+[º°o]?(?:-[A-Z])?(?:\s*(?:,|e)\s*[\dlI]+[º°o]?)*"
+    rf"|{_ROMAN}|(?-i:[IVXL]*[l|][IVXLl|]*)(?![\w|])"  # inciso com OCR: "lX", "l"
+    rf"|§§?\s*[\dlIZSGB|]+[º°o]?(?:-[A-Z])?(?:\s*(?:,|e)\s*[\dlIZSGB|]+[º°o]?)*"
     rf"|(?:{ocr('parágrafo')}|{ocr('par')}\.)\s*{ocr('único')}"
     rf"|(?:{ocr('alínea')}|al\.|{ocr('letra')})\s*['\"‘’]?[a-z]['\"‘’]?(?!\w)"
     rf"|['\"‘’][a-z]['\"‘’])"
@@ -725,11 +882,15 @@ _DIPLOMA_WORDS = (
                   if len(w) >= 4 and w not in CONNECTORS}))
 
 
+# Número de lei com OCR, "g.504/1997", "13.467/Z017", "(8.078/90)".
+_LAW_NUMBER_WORD = re.compile(r"\(?[\dlIOSGBgqZ|][\dlIOoSsGgqBbZz|.\s]*/\s*[\dOolIGgqSsZzBb|]{2,4}\)?")
+
+
 def _diploma_word(word: str) -> bool:
     bare = word.strip("().,;:'\"")
     if not bare:
         return True
-    if bare[0].isupper() or bare[0].isdigit() or bare in ("nº", "n.º", "n°", "/"):
+    if bare[0].isupper() or bare[0].isdigit() or bare in ("nº", "n.º", "n°", "/") or _LAW_NUMBER_WORD.fullmatch(bare):
         return True
     return _diploma_content(bare) or fold(bare).translate(_GLUE_OCR) in CONNECTORS
 
@@ -745,7 +906,7 @@ def _diploma_last(word: str) -> bool:
     """Última palavra de um nome de lei: radical/sigla, número de lei, ano ou ')'."""
     bare = word.rstrip(".,;:")
     return (bare.endswith(")") or _diploma_content(bare)
-            or re.fullmatch(r"\(?[\dlIOS][\dlIOoSsgB.\s]*/\s*[\dOolIg]{2,4}\)?|(?:19|20)\d\d", bare) is not None)
+            or _LAW_NUMBER_WORD.fullmatch(bare) is not None or re.fullmatch(r"(?:19|20)\d\d", bare) is not None)
 
 
 def _ends_sentence(word: str) -> bool:

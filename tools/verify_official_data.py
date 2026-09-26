@@ -9,6 +9,20 @@ EXPECTED = {
     "kaggle_metric.py": "3c4d30e70971144afbd0ae73c6d4ac887faf0f5926de986170de32f72544fc3f",
     "sample_submission.csv": "c299ddb54b94d6375de4e58ecad8fec55a68f4cced667e19b3f4f9f60af4ffdc",
 }
+# Onde cada arquivo do snapshot fica no layout deste repositório, quando a
+# pasta informada não o tiver (ex.: `python -m tools.verify_official_data data`).
+REPO_LAYOUT = {
+    "desafio1_bracis.db": Path("data/desafio1_bracis.db"),
+    "goldenset_offsets.csv": Path("data/goldenset.csv"),
+    "json_to_submission.py": Path("json_to_submission.py"),
+    "kaggle_metric.py": Path("kaggle_metric.py"),
+    "sample_submission.csv": Path("data/sample_submission.csv"),
+    "txt": Path("data/txt"),
+}
+
+def locate(d: Path, name: str) -> Path:
+    p = d / name
+    return p if p.exists() or name not in REPO_LAYOUT else REPO_LAYOUT[name]
 
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -19,27 +33,27 @@ def sha256(path: Path) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("data_dir", type=Path)
+    ap.add_argument("data_dir", type=Path, nargs="?", default=Path("data"))
     ap.add_argument("--skip-hash", action="store_true", help="Valida estrutura/contagens sem exigir exatamente o snapshot de 15/09/2026.")
     args = ap.parse_args()
     d = args.data_dir
     errors=[]
     for name, expected in EXPECTED.items():
-        p=d/name
+        p=locate(d,name)
         if not p.exists():
             errors.append(f"arquivo ausente: {p}")
             continue
         actual=sha256(p)
         status="OK" if actual==expected else "DIFERENTE"
-        print(f"{name:24} {status}  {actual}")
+        print(f"{name:24} {status}  {actual}  ({p})")
         if not args.skip_hash and actual!=expected:
             errors.append(f"hash inesperado para {name}")
-    txt=d/'txt'
+    txt=locate(d,'txt')
     docs=sorted(txt.glob('*.txt')) if txt.exists() else []
     print(f"txt documents: {len(docs)}")
     if len(docs)!=26: errors.append(f"esperados 26 .txt, encontrados {len(docs)}")
 
-    gold=d/'goldenset_offsets.csv'
+    gold=locate(d,'goldenset_offsets.csv')
     if gold.exists():
         rows=list(csv.DictReader(gold.open(encoding='utf-8-sig', newline='')))
         by={}
@@ -53,7 +67,7 @@ def main() -> int:
         if len(rows)!=192 or by!=expected_counts:
             errors.append("contagens do gold não correspondem ao snapshot atual esperado (192 citações)")
 
-    db=d/'desafio1_bracis.db'
+    db=locate(d,'desafio1_bracis.db')
     if db.exists():
         con=sqlite3.connect(db)
         try:

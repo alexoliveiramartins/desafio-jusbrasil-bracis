@@ -124,7 +124,12 @@ def canonical_words(text: str) -> str:
 
 
 def is_number_marker(token: str) -> bool:
-    """Abreviações de 'número': n, nº, n.º, n°, no, nr, nro, num, núm., número (com OCR)."""
+    """Abreviações de 'número': n, nº, n.º, n°, no, nr, nro, num, núm., número (com OCR).
+
+    O "n" lido como "ri" ou "u" só conta com o sinal: "riº", "uº", "u." ("rio" é palavra).
+    """
+    if re.fullmatch(r"(?:ri|u)\.?\s*[º°]\.?|u\.", token.strip(), re.IGNORECASE):
+        return True
     t = re.sub(r"[.º°ª]", "", fold(token).replace("rn", "m").translate(str.maketrans("0c", "oe")))
     return t.startswith("n") and len(t) <= 6 and is_subsequence(t[1:], "umero")
 
@@ -212,7 +217,7 @@ def locate_number(trecho: str) -> tuple[str, int, int]:
         # Barra no lugar do ponto entre DV e ano do CNJ: "7000395-11/2022.7.00...".
         slash_cnj = (gap.strip() == "/" and 3 <= len("".join(digits)) <= 9 and converted is not None
                      and re.fullmatch(r"(?:19|20)\d\d", converted)
-                     and re.match(r"[\s.\-–]*[\dOolIS]", trecho[m.end():m.end() + 5]))
+                     and re.match(r"[\s.\-–]*[\dOolISsDQqZz|]", trecho[m.end():m.end() + 5]))
         # Depois de um espaço, só continua o número um grupo que começa por dígito
         # ou um grupo de milhar com OCR ("60 G81"); "193 D0 STJ" termina em 193.
         space_ok = not gap.isspace() or m.group()[0].isdigit() or (
@@ -222,9 +227,9 @@ def locate_number(trecho: str) -> tuple[str, int, int]:
             break
         if converted is not None and not started and not _looks_numeric(m.group()):
             converted = None
-        if (converted is None and not started and not glued and m.group() in ("l", "I", "L")
-                and re.match(r"[.\s]\s*(?:\d|[OolISgGBL]\d)", trecho[m.end():m.end() + 5])):
-            converted = "1"  # "l.508.709": o 1 inicial lido como letra
+        if (converted is None and not started and not glued and m.group() in ("l", "I", "L", "|")
+                and re.match(r"[.\s]\s*(?:\d|[OolISsgGBbLDQqZz|]\d)", trecho[m.end():m.end() + 5])):
+            converted = "1"  # "l.508.709": o 1 inicial lido como letra (ou "|")
         if converted is not None:
             if not started:
                 first = m.start()
@@ -321,16 +326,22 @@ def _year4(value: str) -> int:
     return 1900 + year if year >= 30 else 2000 + year
 
 
+_LAW_NUMBER_OCR = re.compile(r"(?<![A-Za-zÀ-ÿ])(?=[\dOolISsZzGgqQBb|.]*\d)[\dOolISsZzGgqQBb|][\dOolISsZzGgqQBbD|.]*(?=\s*/)")
+_LAW_YEAR_OCR = re.compile(r"(?<=/)(?=\s*[\dOolISsZzGgqQBbD|]*\d)\s*[\dOolISsZzGgqQBbD|]{2,4}(?![A-Za-z\d])")
+
+
 def diploma_key(text: str) -> str | None:
     """Identifica o diploma citado, tolerando OCR, abreviações e sinônimos.
 
     Ordem: nome/sigla conhecidos -> número da lei -> nome aproximado ->
     radicais ("processual" + "civil" -> CPC; "consumerista" -> CDC).
     """
+    # Número e ano de lei com OCR ("13.l0s/2015", "G4/1990", "13.467/Z017"): letras
+    # confundíveis viram dígitos com OCR_DIGITS, ainda com caixa (G→6, g→9).
+    text = _LAW_NUMBER_OCR.sub(lambda m: m.group().translate(OCR_DIGITS), text)
+    text = _LAW_YEAR_OCR.sub(lambda m: m.group().translate(OCR_DIGITS), text)
     t = canonical_words(text)
-    # Número de lei com OCR ("13.l0s/2015"): letras confundíveis viram dígitos.
-    t = re.sub(r"(?<![a-z])(?=[\dlois.]*\d)[\dlois][\dlois.]*(?=/)",
-               lambda m: m.group().translate(str.maketrans("lois", "1015")), t)
+    t = re.sub(r"\blc[i1l]\b", "lei", t)  # "Lci": "e" lido como "c"
     # fold() já converteu "nº" em "no"; remove o marcador só antes de números.
     t = re.sub(r"\bn[o.°]?\s*(?=\d)", "", t)
     t = re.sub(r"(\d)\.\s?(\d)", r"\1\2", t)
@@ -426,7 +437,7 @@ def _diploma_by_stems(t: str) -> str | None:
 def article_number(trecho: str) -> int | None:
     # Mesmo conjunto de OCR do extrator (patterns.ARTICLE_NUMBER): ler
     # menos caracteres truncaria "1S0" em "1", um artigo que existe (τ).
-    m = re.search(r"(?<!\w)[aáàâã]rt\w*[\s.\-–]*(?:n[º°o.]*\s*)?([\dlISLBg][\dOolIgGSBL.]*)", trecho, re.IGNORECASE)
+    m = re.search(r"(?<!\w)[aáàâão]r[tf]\w*[\s.\-–]*(?:n[º°o.]*\s*)?([\dlISLBgQZ|][\dOolIgGSBLDQZ|.]*)", trecho, re.IGNORECASE)
     if not m:
         return None
     raw = m.group(1).rstrip(".")

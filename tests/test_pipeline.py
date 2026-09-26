@@ -3,7 +3,7 @@ from pathlib import Path
 
 from src.classify import CanonicalIndex
 from src.normalize import appeal_chain, class_code, cnj_key, diploma_key, number_digits, ocr_fix_words
-from src.spans import extract_citations
+from src.spans import clean, extract_citations
 from src.main import process_text
 from src.classify import resolve
 
@@ -81,6 +81,14 @@ class ExtractorTest(unittest.TestCase):
     def test_ocr_keywords(self):
         spans = [c["trecho"] for c in extract_citations("Conforme a 5úmula 211 do STJ, nego.")]
         self.assertEqual(spans, ["5úmula 211 do STJ"])
+
+    def test_ordinal_appeal(self):
+        # O ordinal de recurso repetido é parte do nome ("Terceiro AG.REG na Rcl").
+        for text in ["Terceiro AG.REG na Rcl nº 62.425/SP", "Segundos EDcl no AgInt no REsp 1.597.443/PR"]:
+            [c] = extract_citations(f"Ver {text}.")
+            self.assertEqual(c["trecho"], text)
+        [c] = extract_citations("Segundo o REsp 1.883.715/SP, nego.")
+        self.assertEqual(c["trecho"], "REsp 1.883.715/SP")
 
     def test_offsets_are_codepoints(self):
         text = "Ação — ver REsp 1.883.715/SP."
@@ -285,6 +293,63 @@ class GeneralFormsTest(unittest.TestCase):
         self.assertEqual((trecho, classe), ("REE 0600306-17.2020.6.06.0074, TSE", "real"))
         # Cabeçalho em caixa-alta não é sigla de classe: o número é o do próprio processo.
         self.assertEqual(self.run_doc("PARECER\n\nProcesso nº 4536167-15.2018.5.01.7399\n\nTrata-se de consulta."), [])
+
+
+@unittest.skipUnless(DB.exists(), "base canônica ausente")
+class RobustnessTest(unittest.TestCase):
+    """Digitalização ruim: OCR, espaço perdido/sobrando, mojibake e numeração de margem."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.index = CanonicalIndex.from_sqlite(DB)
+
+    def run_doc(self, text):
+        return [(c["trecho"], c["classificacao"], (c["resolucao"] or {}).get("id_canonico"))
+                for c in process_text("x", text, self.index)["citacoes"]]
+
+    def test_ocr_letters_inside_numbers(self):
+        # O extrator aceita as mesmas trocas que normalize.OCR_DIGITS converte (B=8, q=9, Z=2, l=1).
+        self.assertEqual(self.run_doc("Vide AgInt no REsp 1.664.Bq3/PR."),
+                         [("AgInt no REsp 1.664.Bq3/PR", "real", "2684902370")])
+        self.assertEqual(self.run_doc("Conforme a 5úmula Z1l do 5TJ, nego."),
+                         [("5úmula Z1l do 5TJ", "real", "1289710776")])
+        self.assertEqual(self.run_doc("Aplica-se o art. 1º, IX da Lei Complementar nº G4/1990."),
+                         [("art. 1º, IX da Lei Complementar nº G4/1990", "real", "11304039")])
+
+    def test_ocr_that_is_not_a_number(self):
+        self.assertEqual(self.run_doc("Veja a Súmula d0 STJ sobre o tema."), [])  # "d0" é "do"
+        [(trecho, _, _)] = self.run_doc("Rcl 45429 STF.\n\n|||  |||")  # fio de tabela não é "111"
+        self.assertEqual(trecho, "Rcl 45429")
+        # "riº" é o "nº" com OCR, não abreviação de classe: número do próprio processo.
+        self.assertEqual(self.run_doc("Processo riº 9426435-30.2024.8.08.5965\n\nTrata-se."), [])
+
+    def test_ocr_in_keywords(self):
+        self.assertEqual(self.run_doc("Vide Rd nº 88.860/PE.")[0][:2], ("Rd nº 88.860/PE", "inventada"))
+        self.assertEqual([t for t, _, _ in self.run_doc("Ver arf. 93, IX da Constituição Federal.")],
+                         ["arf. 93, IX da Constituição Federal"])
+
+    def test_glued_and_split_words(self):
+        self.assertEqual(clean("a incidência doart. 303 da CF")[0], "a incidência do art. 303 da CF")
+        self.assertEqual(clean("oREspnº 2020005/RJ e a Súmula nº 443do STJ")[0],
+                         "o REsp nº 2020005/RJ e a Súmula nº 443 do STJ")
+        self.assertEqual(clean("na Suspe nsão de Sent ença")[0], "na Suspensão de Sentença")
+        # Caixa trocada não é conector colado: "aGrG" continua uma palavra.
+        self.assertEqual(clean("aGrG em Recurso eSPECIAL")[0], "aGrG em Recurso eSPECIAL")
+        # Spans continuam no texto original.
+        self.assertEqual(self.run_doc("incidência doart. 186 do Código Civil."),
+                         [("art. 186 do Código Civil", "real", "10718759")])
+
+    def test_mojibake(self):
+        self.assertEqual(self.run_doc("A ReclamaÃ§Ã£o nÂº 45429, STF."),
+                         [("ReclamaÃ§Ã£o nÂº 45429, STF", "real", "1769282037")])
+        # "DÃ" + NBSP é "DA" com OCR, não o mojibake de "à".
+        self.assertEqual(clean("DÃ RELATORIA")[0], "DÃ RELATORIA")
+
+    def test_margin_line_numbers(self):
+        text = "".join(f"{k:>3}  linha {k} do texto\n" for k in range(1, 8)) + "RECURSO ESPECIAL\n  8  Trata-se."
+        self.assertEqual(self.run_doc(text), [])
+        # Parágrafos numerados ("1.  Dos fatos") não são numeração de margem.
+        self.assertEqual(clean("1.  Dos fatos\n2.  Do direito")[0], "1.  Dos fatos\n2.  Do direito")
 
 
 if __name__ == "__main__":

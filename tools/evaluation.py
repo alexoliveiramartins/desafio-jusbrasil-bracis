@@ -53,9 +53,9 @@ def run_split(split: Split, index: CanonicalIndex, debug: bool = False) -> dict[
 
 
 def score(gold: dict[str, list[dict]], outputs: dict[str, dict]) -> dict:
-    """Resultado de kaggle_metric.avaliar + recall de spans (IoU >= 0,5)."""
+    """Resultado de kaggle_metric.avaliar + recall de spans (IoU >= 0,5) e de spans exatos."""
     solution, submission = [], []
-    found = total = 0
+    found = exact = total = 0
     for doc_id, rows in gold.items():
         doc = outputs.get(doc_id, {"citacoes": []})
         submission.append({"documento_id": doc_id, "citacoes": encode(doc)})
@@ -69,9 +69,12 @@ def score(gold: dict[str, list[dict]], outputs: dict[str, dict]) -> dict:
         spans = [(c["inicio"], c["fim"]) for c in doc["citacoes"]]
         for r in rows:
             total += 1
-            found += any(iou((int(r["inicio"]), int(r["fim"])), s) >= 0.5 for s in spans)
+            gold_span = (int(r["inicio"]), int(r["fim"]))
+            found += any(iou(gold_span, s) >= 0.5 for s in spans)
+            exact += gold_span in spans
     result = avaliar(pd.DataFrame(solution), pd.DataFrame(submission, dtype=str))
     result["recall_spans"] = found / total if total else 0.0
+    result["exact_spans"] = exact / total if total else 0.0
     return result
 
 
@@ -96,6 +99,8 @@ def summary(result: dict) -> str:
         f1 = " ".join(f"{c[:4]}={v:.3f}" for c, v in n["f1_por_classe"].items())
         parts.append(f"N{level} {n['score']:.3f} ({f1}) τ={n['tau']:.3f}")
     recall = f" | spans {result['recall_spans']:.3f}" if "recall_spans" in result else ""
+    if "exact_spans" in result:
+        recall += f" (exatos {result['exact_spans']:.3f})"
     return f"score={result['score_final']:.4f} | " + " | ".join(parts) + recall
 
 

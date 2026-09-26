@@ -28,8 +28,11 @@ def main() -> int:
     ap.add_argument('--report', type=Path, default=Path('reports/current_errors.json'))
     args=ap.parse_args()
 
-    metric=load_metric(args.data_dir/'kaggle_metric.py')
-    sol=build_solution(args.data_dir/'goldenset_offsets.csv')
+    # Snapshot oficial (data/current/) ou layout do repositório (data/).
+    metric_path=args.data_dir/'kaggle_metric.py'
+    gold_path=args.data_dir/'goldenset_offsets.csv'
+    metric=load_metric(metric_path if metric_path.exists() else Path('kaggle_metric.py'))
+    sol=build_solution(gold_path if gold_path.exists() else args.data_dir/'goldenset.csv')
     sub=pd.read_csv(args.submission)
     res=metric.avaliar(sol,sub)
     print(json.dumps(res,ensure_ascii=False,indent=2))
@@ -42,7 +45,7 @@ def main() -> int:
         preds=metric._parse_submission_cell(sub_idx.loc[doc,'citacoes'],doc) if doc in sub_idx.index else []
         pares,g_sem,p_sem=metric._casar(golds,preds)
         matched_golds=[golds[gi] for gi,_ in pares]
-        text=(args.data_dir/'txt'/f'{doc}.txt').read_text(encoding='utf-8')
+        with open(args.data_dir/'txt'/f'{doc}.txt',encoding='utf-8',newline='') as f: text=f.read()
         for gi,pi in pares:
             g,p=golds[gi],preds[pi]
             link_ok=(g['classe']!='real' or p['id_canonico'] in g['doc_ids'])

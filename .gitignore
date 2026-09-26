@@ -9,6 +9,7 @@ resultados/
 relatorios/
 submission.csv
 data/synthetic/
+data/stress/
 .cache/
 
 # Current Kaggle snapshot and local experiment outputs

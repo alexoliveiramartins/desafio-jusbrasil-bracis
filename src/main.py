@@ -23,10 +23,17 @@ import json
 import sys
 import time
 import traceback
+from functools import lru_cache
 from pathlib import Path
 
 from .classify import INCOMPLETA, REAL, CanonicalIndex, Resolution, resolve
 from .spans import clean, expand_spans, extract_citations, find_anchors, to_original
+
+
+@lru_cache(maxsize=4)
+def _name_words(known_relators: tuple[frozenset, ...]) -> frozenset[str]:
+    """Todos os tokens de nomes de relatores da base (para juntar/separar nomes na limpeza)."""
+    return frozenset().union(*known_relators)
 
 
 def extract(content: str, known_relators: list[frozenset] = ()) -> list[dict]:
@@ -36,7 +43,7 @@ def extract(content: str, known_relators: list[frozenset] = ()) -> list[dict]:
     limpo; o mapa de offsets devolve cada span ao original. `trecho` é o texto
     original; `trecho_norm`, o limpo, é o que o resolvedor lê.
     """
-    cleaned, mapping = clean(content)
+    cleaned, mapping = clean(content, _name_words(tuple(known_relators)))
     found = expand_spans(cleaned, extract_citations(cleaned))
     found = sorted(found + find_anchors(cleaned, found, known_relators), key=lambda c: c["inicio"])
     citations = []

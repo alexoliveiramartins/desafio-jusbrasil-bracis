@@ -37,6 +37,7 @@ def run_one(split: Split, index: CanonicalIndex) -> dict:
         "score": result["score_final"],
         "tau": max(n["tau"] for n in niveis.values()),
         "recall_spans": result["recall_spans"],
+        "exact_spans": result["exact_spans"],
         "niveis": {k: round(v["score"], 4) for k, v in niveis.items()},
         "f1": {k: v["f1_por_classe"] for k, v in niveis.items()},
     }
@@ -66,7 +67,7 @@ def main() -> None:
                 generate(profile, folder, seed, src)
             results[profile].append(run_one(Split(folder.name, folder / "txt", folder / "goldenset.csv"), index))
 
-    print(f"\n{'perfil':<22}{'papel':<10}{'média':>8}{'desvio':>8}{'pior':>8}{'τ máx':>8}{'spans':>8}"
+    print(f"\n{'perfil':<22}{'papel':<10}{'média':>8}{'desvio':>8}{'pior':>8}{'τ máx':>8}{'spans':>8}{'exatos':>8}"
           "   F1 médio (real/inv/inc)")
     report = {}
     for profile, runs in results.items():
@@ -84,12 +85,13 @@ def main() -> None:
             "pior": min(scores),
             "tau_max": max(r["tau"] for r in runs),
             "recall_spans": statistics.mean(r["recall_spans"] for r in runs),
+            "exact_spans": statistics.mean(r["exact_spans"] for r in runs),
             "f1_medio": f1m,
             "execucoes": runs,
         }
         report[profile] = row
         print(f"{profile:<22}{row['papel']:<10}{row['media']:>8.4f}{row['desvio']:>8.4f}{row['pior']:>8.4f}"
-              f"{row['tau_max']:>8.3f}{row['recall_spans']:>8.3f}   "
+              f"{row['tau_max']:>8.3f}{row['recall_spans']:>8.3f}{row['exact_spans']:>8.3f}   "
               f"{f1m.get('real', 0):.3f}/{f1m.get('inventada', 0):.3f}/{f1m.get('incompleta', 0):.3f}")
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")

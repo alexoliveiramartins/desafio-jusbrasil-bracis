@@ -39,6 +39,8 @@ python3 json_to_submission.py resultados submission.csv   # JSONs -> CSV do Kagg
 pip install -r requirements.txt                            # pandas/numpy, só para a métrica
 python3 -m tools.evaluate --submission submission.csv      # métrica oficial contra data/goldenset.csv
 python3 -m tools.evaluate                                  # atalho: roda o pipeline e pontua o dev
+python3 -m tools.verify_official_data                      # base, gabarito e métrica batem com o snapshot oficial?
+python3 tools/audit_exact_spans.py --gold data/goldenset.csv --submission submission.csv --out relatorios/spans.csv
 ```
 
 ## Como funciona
@@ -51,7 +53,7 @@ python3 -m tools.evaluate                                  # atalho: roda o pipe
 
 | Módulo | Papel |
 |---|---|
-| `src/spans.py` | **Onde estão as citações.** (1) Limpeza com mapa de offsets: remove invisíveis, junta hifenização de fim de linha e devolve os spans em codepoints do texto **original**. (2) Regex das formas conhecidas, tolerantes a OCR (`ocr("súmula")` aceita "5úmula"; números aceitam "21737l8"). (3) Âncoras gerais, que partem do que toda citação tem, e não de uma lista de formatos: número + frase jurídica antes dele; súmula + número; artigo + enumeração + diploma, nas duas ordens; tribunal + ano + relator na mesma oração. |
+| `src/spans.py` | **Onde estão as citações.** (1) Limpeza com mapa de offsets: desfaz mojibake ("Ã§"→"ç"), tira numeração de linha da margem e invisíveis, junta hifenização de fim de linha e palavras partidas ("Suspe nsão"), separa palavras coladas ("doart.", "REsp1.664", "443do") e devolve os spans em codepoints do texto **original**. (2) Regex das formas conhecidas, tolerantes a OCR (`ocr("súmula")` aceita "5úmula", "Súmnla", "Súmulo"; números aceitam "21737l8", "1.664.Bq3", "20Z3"). (3) Âncoras gerais, que partem do que toda citação tem, e não de uma lista de formatos: número + frase jurídica antes dele; súmula + número; artigo + enumeração + diploma, nas duas ordens; tribunal + ano + relator na mesma oração. |
 | `src/classify.py` | **O que cada citação é.** Índice da base (número **próprio** de cada acórdão, lido do cabeçalho; súmulas; dispositivos) e resolvedor: único componente que pode dizer `real`, e só por consulta à base. |
 | `src/normalize.py` | Compartilhado: OCR em números, chaves CNJ, diplomas (nome, sigla, número da lei, radicais), cadeia recursal, classe processual, nomes. |
 | `src/main.py` | Pipeline por documento e CLI do contrato `--input/--output`. |
@@ -113,6 +115,68 @@ python3 -m tools.battery                       # todos os perfis × 5 sementes -
 python3 -m tools.synth_llm --split llm_holdout --docs 60 --seed 5000   # requer Ollama
 python3 -m unittest discover -s tests -t .
 ```
+
+### Robustez a ruído (`tools.stress`)
+
+Os sintéticos acima escrevem peças novas. Os conjuntos de estresse partem dos **próprios 26 textos
+do dev** e só os degradam, então medem quanto a solução perde exclusivamente por causa do ruído.
+Cada caractere original guarda o que virou e o que foi inserido antes dele, e o gabarito é
+remapeado para o texto novo com offsets exatos. Os rótulos continuam válidos porque dígito nunca vira
+outro dígito, só letra parecida (0→O, 1→l, 5→S), e lixo de página só entra fora das citações.
+
+| Família | O que faz |
+|---|---|
+| `ocr` | confusões de OCR: 0→O, 1→l/I/\|, 5→S, 8→B, rn↔m, cl↔d, e↔c, ç→c, º→° |
+| `acentos` | perda de acentos por palavra; às vezes o documento inteiro em NFD (acento combinante) |
+| `espacos` | espaço duplo, NBSP, espaço fino, tab, palavras coladas ("doSTJ") e partidas ("Recur so"), "5. 230.808" |
+| `quebras` | reflow de PDF, parágrafo espúrio no meio da frase, hifenização ("juris-\\n", "¬\\n", soft hyphen) |
+| `fim_de_linha` | CRLF (arquivo salvo no Windows), total ou misto |
+| `pontuacao` | números sem pontos ou com vírgula/espaço, "nº"→"n°/no/n.", "/SP"→"-SP", pontuação de frase |
+| `typos` | erros de digitação: troca, omissão, duplicação e tecla vizinha (ABNT2); siglas ficam intactas |
+| `caixa` | linhas em caixa alta, palavras em caixa alta/baixa/invertida |
+| `lixo` | cabeçalho/rodapé, "Página 3 de 90", carimbo de assinatura com OAB, "Autos nº <CNJ>", CPF/CNPJ, CEP, valor da causa, numeração de linha na margem |
+| `mojibake` | UTF-8 lido como cp1252 ("ção"→"Ã§Ã£o", "nº"→"nÂº"), por palavra ou no documento inteiro |
+| `invisiveis` | zero-width space/joiner, BOM, word joiner e soft hyphen em qualquer lugar, inclusive dentro de números |
+
+Perfis: `limpo` (controle, reproduz o dev byte a byte), `so_<família>` (ablação: uma família na
+intensidade "pesado") e `leve`, `moderado`, `pesado`, `extremo` (todas juntas, intensidade
+crescente). Assim como os holdouts, é instrumento de **medida**: não ajuste regras olhando estes erros.
+
+```bash
+python3 -m tools.stress                      # gera data/stress/<perfil>_s<semente>/ (3 sementes)
+python3 -m tools.stress.bench                # solução atual × baseline final_robust -> relatorios/stress/benchmark.{json,md}
+python3 -m tools.evaluate data/stress/extremo_s1000   # um conjunto pelo avaliador de sempre
+```
+
+Medição de 26/09/2026, **antes** das melhorias de robustez abaixo (3 sementes, 192 citações por
+conjunto; "edição" = caracteres alterados ou inseridos sobre o total):
+
+| Perfil | Edição | Solução atual: score | spans | τ | `final_robust`: score | spans | τ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| limpo | 0% | 1,100 | 1,000 | 0 | 1,100 | 1,000 | 0 |
+| leve | 8% | 1,016 ± 0,011 | 0,891 | 0 | 0,791 ± 0,022 | 0,694 | 0 |
+| moderado | 16% | 0,938 ± 0,006 | 0,799 | 0 | 0,510 ± 0,051 | 0,444 | 0,031 |
+| pesado | 32% | 0,772 ± 0,014 | 0,590 | 0 | 0,195 ± 0,059 | 0,181 | 0,031 |
+| extremo | 50% | 0,656 ± 0,011 | 0,469 | 0 | 0,074 ± 0,026 | 0,059 | 0,031 |
+
+A solução atual nunca chama uma inventada de real (τ = 0 em todos os perfis). Quase toda a perda
+vem de citações não extraídas, não de classe errada. Na ablação, o que mais custa é o OCR de
+dígitos fora do vocabulário do pipeline (Z→2, D→0, s→5, q→9, b→6, |→1: 120 das 141 perdas em
+`so_ocr`). Depois vêm espaços estranhos, mojibake e pontuação. Numeração de linha na margem gera
+espúrias ("RECURSO ESPECIAL\n  8"). CRLF, caracteres invisíveis e acentos não custam nada.
+
+Depois dessa medição, o pipeline ganhou tolerância geral a esses defeitos (conjunto de letras de OCR
+único para extração e classificação, confusões a↔o, u↔n, t↔f, g↔q, cl↔d nas palavras-chave, "riº"/"uº"
+como "nº", palavras coladas e partidas, mojibake e numeração de margem), sem mudar nada no dev
+(1,0999, 192/192 spans exatos) nem piorar os sintéticos de iteração. Os ajustes foram decididos só em
+conjuntos de iteração; a avaliação final segue o protocolo registrado antes deles em
+[`tools/stress/PROTOCOLO.md`](tools/stress/PROTOCOLO.md), com conjuntos inéditos gerados depois do
+congelamento do código.
+
+`baseline/` guarda referências que não fazem parte da solução: `poc/` (prova de conceito original)
+e `final_robust/` (solução da branch `feature/final-robust-solution`, só regex, com tabelas fixas
+de súmulas e artigos). A `final_robust` também acerta todo o dev, mas não generaliza: fica entre
+0,05 e 0,64 nos sintéticos, contra 0,88 a 1,10 da solução atual.
 
 ## Resultados
 

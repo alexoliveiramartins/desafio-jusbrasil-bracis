@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .normalize import (
+    OCR_DIGITS,
     appeal_chain,
     article_number,
     canonical_words,
@@ -403,10 +404,20 @@ _SUMULA_CUE = re.compile(
 )
 
 
+# Número de súmula com maioria de letras de OCR ("SO6", "Z1l", "|b1"): number_digits
+# recusa esses tokens (palavra não vira número), mas logo depois da pista a posição é
+# do número. Mesmo formato que o extrator aceita (spans.SUMULA_NUMBER).
+_SUMULA_OCR_NUMBER = re.compile(
+    r"(?<![\w|])(?:\d|[lIBgGSOQZ|](?=[\dOolISsgGBbDQqZz|]{0,2}\d))[\dOolISsgGBbDQqZz|]{0,3}(?![\w|])")
+
+
 def _resolve_sumula(trecho: str, index: CanonicalIndex) -> Resolution:
     """Número + tribunal (sigla ou extenso) + vinculante, em qualquer ordem."""
     cue = _SUMULA_CUE.search(trecho)
     digits, fixes = number_digits(trecho[cue.start():] if cue else trecho)
+    if not digits and cue and (m := _SUMULA_OCR_NUMBER.search(trecho, cue.end())):
+        digits = re.sub(r"\D", "", m.group().translate(OCR_DIGITS))
+        fixes = sum(not c.isdigit() for c in m.group())
     if not digits or len(digits) > 4:
         return _result(INCOMPLETA, None, "incompleta_sem_numero")
     numero = int(digits)
@@ -438,7 +449,7 @@ def _resolve_article(trecho: str, index: CanonicalIndex) -> Resolution:
 
 # ------------------------------------------------------------------ descritivas
 
-_YEAR = re.compile(r"\b((?:19|2[0O])[\dOolIgSBL]{2})\b")
+_YEAR = re.compile(r"(?<![\w|])((?:19|[2Z][0OD])[\dOolIgGSsBbLDQqZz|]{2})(?![\w|])")
 _RELATOR_FALLBACK = re.compile(
     rf"(?:{ocr('relatoria')}\s+\S+|Rel\.\s*Min\.)\s*(?:Min(?:\.|istr[oa])\s*)?(.+)$",
     re.IGNORECASE | re.DOTALL,
@@ -464,7 +475,7 @@ def descriptive_matches(trecho: str, index: CanonicalIndex) -> list[str] | None:
     if not years:
         return None
     ano = int(years[0])
-    head = re.split(r"\b(?:[S5]T[FJM]|T[S5][TE])\b|(?:19|2[0O])[\dOolIgSB]{2}", text)[0]
+    head = re.split(r"\b(?:[S5]T[FJM]|T[S5][TE])\b|(?:19|[2Z][0OD])[\dOolIgGSsBbLDQqZz|]{2}", text)[0]
     classe = class_code(head)
     courts = courts_in(text)
     if classe and courts and courts[0] not in CLASS_COURTS.get(classe, {courts[0]}):
