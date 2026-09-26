@@ -1,5 +1,8 @@
 # desafio-jusbrasil-bracis
 
+Experimento opcional: [fuzzy regex](docs/ExperimentoFuzzy.md), com comparação
+entre tolerância global e tolerância restrita a palavras.
+
 - Rodar o extrator:
 
 ```bash
