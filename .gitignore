@@ -10,3 +10,8 @@ relatorios/
 submission.csv
 data/synthetic/
 .cache/
+
+# Current Kaggle snapshot and local experiment outputs
+data/current/
+runs/
+reports/
