@@ -46,10 +46,10 @@ def load_gold(path: Path) -> dict[str, list[dict]]:
     return dict(by_doc)
 
 
-def run_split(split: Split, index: CanonicalIndex, debug: bool = False) -> dict[str, dict]:
+def run_split(split: Split, index: CanonicalIndex, debug: bool = False, nlp=None) -> dict[str, dict]:
     """Saída do pipeline (formato do contrato) para cada documento do goldenset."""
     gold = load_gold(split.gold)
-    return {doc_id: process_file(split.txt / f"{doc_id}.txt", index, debug=debug) for doc_id in gold}
+    return {doc_id: process_file(split.txt / f"{doc_id}.txt", index, debug=debug, nlp=nlp) for doc_id in gold}
 
 
 def score(gold: dict[str, list[dict]], outputs: dict[str, dict]) -> dict:

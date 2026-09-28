@@ -235,8 +235,18 @@ def surfaces(raw: str, facts: list[Fact]) -> list[str | None]:
         items = json.loads(raw).get("citacoes", [])
     except (json.JSONDecodeError, AttributeError):
         return [None] * len(facts)
-    items = [i.strip().rstrip(".;,:").strip() if isinstance(i, str) else None for i in items]
+    items = [_unwrap(i.strip().rstrip(".;,:").strip()) if isinstance(i, str) else None for i in items]
     return (items + [None] * len(facts))[:len(facts)]
+
+
+WRAPPERS = re.compile(r"^(?:<(.*)>|\*\*(.*)\*\*|\"(.*)\"|“(.*)”|«(.*)»)$", re.DOTALL)
+
+
+def _unwrap(item: str) -> str:
+    """Tira delimitadores que o modelo copia do exemplo do prompt ("<citação 1>") ou de markdown."""
+    while m := WRAPPERS.match(item):
+        item = next(g for g in m.groups() if g is not None).strip().rstrip(".;,:").strip()
+    return item
 
 
 MARKER = re.compile(r"\[\[C(\d+)\]\]|\{C(\d+)\}|\[C(\d+)\]")

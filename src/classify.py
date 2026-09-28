@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .normalize import (
     OCR_DIGITS,
+    number_groups,
     appeal_chain,
     article_number,
     canonical_words,
@@ -334,18 +335,11 @@ def _resolve_process(trecho: str, index: CanonicalIndex, context: str, after: st
     if not digits:
         return _result(INCOMPLETA, None, "incompleta_sem_numero")
 
-    key = cnj_key(digits) if len(digits) >= 14 else None
-    if key:
-        candidates = [c for c in index.by_cnj.get(key, ()) if index.records[c].tribunal in (cnj_justice(key), None)]
-    else:
-        candidates = _filter_by_class(trecho, list(index.by_short.get(short_key(digits), ())), index)
-    uf = trailing_uf(trecho)
-    if uf:
-        candidates = [c for c in candidates if index.records[c].uf in (uf, None)]
-    # Tribunal citado explicitamente ("(STJ)", "Superior Tribunal Militar, …").
-    cited_courts = set(courts_in(trecho))
-    if cited_courts:
-        candidates = [c for c in candidates if index.records[c].tribunal in cited_courts]
+    candidates = _process_candidates(digits, trecho, index)
+    if not candidates and (robust := _robust_number(trecho, digits)):
+        # A leitura principal não achou registro; o número lido de novo com OCR colado
+        # ("9Bb-96.2010.G…", "67 067", "…-3\ufeff2 2012") pode achar. Só letra -> dígito.
+        candidates, fixes = _process_candidates(robust, trecho, index), fixes or 1
     if not candidates:
         return _result(INVENTADA, None, "inventada_ocr" if fixes else "inventada")
 
@@ -383,6 +377,35 @@ def _resolve_process(trecho: str, index: CanonicalIndex, context: str, after: st
     else:
         regra = "real_exato"
     return _result(REAL, best, regra)
+
+
+def _process_candidates(digits: str, trecho: str, index: CanonicalIndex) -> list[str]:
+    """Registros com esse número, filtrados por classe, UF e tribunal citados no trecho."""
+    key = cnj_key(digits) if len(digits) >= 14 else None
+    if key:
+        candidates = [c for c in index.by_cnj.get(key, ()) if index.records[c].tribunal in (cnj_justice(key), None)]
+    else:
+        candidates = _filter_by_class(trecho, list(index.by_short.get(short_key(digits), ())), index)
+    uf = trailing_uf(trecho)
+    if uf:
+        candidates = [c for c in candidates if index.records[c].uf in (uf, None)]
+    # Tribunal citado explicitamente ("(STJ)", "Superior Tribunal Militar, …").
+    cited_courts = set(courts_in(trecho))
+    if cited_courts:
+        candidates = [c for c in candidates if index.records[c].tribunal in cited_courts]
+    return candidates
+
+
+def _robust_number(trecho: str, digits: str) -> str | None:
+    """Número do trecho pelo leitor de OCR colado (normalize.number_groups), se for o único candidato
+    e diferente do que a leitura principal achou: CNJ (14 a 20 dígitos) ou número curto (3 a 8)."""
+    groups = [g for g in number_groups(trecho) if not (len(g) == 4 and g[:2] in ("19", "20"))]
+    cnj = [g.zfill(20) for g in groups if 14 <= len(g) <= 20]
+    short = [g for g in groups if 3 <= len(g) <= 8]
+    robust = cnj[0] if len(cnj) == 1 else short[0] if not cnj and len(short) == 1 else None
+    if robust is None or robust.lstrip("0") == digits.lstrip("0"):
+        return None
+    return robust
 
 
 def _before_number(trecho: str) -> str:

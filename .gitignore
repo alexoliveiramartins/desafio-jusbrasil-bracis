@@ -23,3 +23,9 @@ reports/
 .ruff_cache/
 .env
 tempCodeRunnerFile.py
+
+# Pesos do modelo (baixados com tools/baixar_modelo.py; não vão para o git nem para a imagem)
+modelos/
+# Saídas e pacotes de submissão (regeneráveis)
+saida/
+saidas.zip

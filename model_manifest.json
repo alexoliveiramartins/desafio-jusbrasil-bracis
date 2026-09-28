@@ -1,0 +1,43 @@
+{
+  "descricao": "Modelo da camada de NLP opcional (src/nlp.py). A versão só com regras não usa modelo nenhum.",
+  "modelo": {
+    "hf_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+    "revisao": "a06e946bb6b655725eafa393f4a9745d460374c9",
+    "arquivo": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+    "bytes": 2497281120,
+    "url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    "licenca": "apache-2.0",
+    "gated": false,
+    "fine_tune": false,
+    "quantizacao": "GGUF Q4_K_M (quantização publicada no próprio repositório; pesos sem alteração nossa)",
+    "modelo_base": {
+      "hf_repo": "Qwen/Qwen3-4B-Instruct-2507",
+      "revisao": "cdbee75f17c01a7cc42f958dc650907174af0554",
+      "licenca": "apache-2.0"
+    }
+  },
+  "runtime": {
+    "motor": "ollama",
+    "versao": "0.33.2",
+    "imagem_cuda": "ollama/ollama:0.33.2@sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2",
+    "imagem_rocm": "ollama/ollama:0.33.2-rocm@sha256:eaddb04a9e21fa3950c279792f04752db7addeebc5e9f314d9abc0dda33bca24",
+    "modelfile": "docker/nlp/Modelfile",
+    "nome_local": "caca-nlp",
+    "paralelismo": 1
+  },
+  "decodificacao": {
+    "temperature": 0,
+    "seed": 42,
+    "num_ctx": 8192,
+    "num_predict": 4096,
+    "think": false,
+    "saida": "JSON restrito por schema (format do Ollama)"
+  },
+  "execucao": {
+    "rede": "nenhuma chamada externa em runtime: o servidor escuta só em 127.0.0.1 dentro do contêiner",
+    "pesos": "montados em /models (baixados antes com tools/baixar_modelo.py e conferidos pelo sha256)",
+    "base": "montada em /data/ref/desafio1_bracis.db (CACA_DB)",
+    "fallback": "sem pesos, hash divergente, servidor fora do ar ou orçamento de tempo excedido: saída só com as regras"
+  }
+}

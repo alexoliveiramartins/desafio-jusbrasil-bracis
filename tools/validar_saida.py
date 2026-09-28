@@ -1,0 +1,80 @@
+"""Confere as saídas contra o Contrato de Entrada e Saída antes de submeter.
+
+    python3 -m tools.validar_saida --input data/txt --output resultados [--db data/desafio1_bracis.db]
+
+Para cada .txt de --input exige <documento_id>.json em --output com todos os campos, e confere:
+trecho == texto[inicio:fim] (codepoints, arquivo lido com newline=""), tipo e classificação válidos,
+resolucao.id_canonico só em `real` e existente na base, confianca em [0, 1], spans dentro do texto.
+Só biblioteca padrão. Sai com código 1 se houver qualquer problema.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+FIELDS = {"inicio", "fim", "trecho", "tipo", "classificacao", "resolucao", "confianca"}
+
+
+def check(txt_dir: Path, out_dir: Path, db: Path | None) -> list[str]:
+    ids = None
+    if db and db.is_file():
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            ids = {str(i) for (i,) in conn.execute("SELECT id FROM documentos")}
+    problems, total = [], 0
+    for txt in sorted(txt_dir.glob("*.txt")):
+        out = out_dir / f"{txt.stem}.json"
+        if not out.is_file():
+            problems.append(f"{txt.stem}: sem {out.name}")
+            continue
+        text = txt.open(encoding="utf-8", newline="").read()
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        if doc.get("documento_id") != txt.stem or not isinstance(doc.get("citacoes"), list):
+            problems.append(f"{txt.stem}: documento_id/citacoes inválidos")
+            continue
+        for n, c in enumerate(doc["citacoes"]):
+            where = f"{txt.stem}#{n}"
+            total += 1
+            if missing := FIELDS - set(c):
+                problems.append(f"{where}: faltam campos {sorted(missing)}")
+                continue
+            if not (isinstance(c["inicio"], int) and isinstance(c["fim"], int) and 0 <= c["inicio"] < c["fim"] <= len(text)):
+                problems.append(f"{where}: span inválido {c['inicio']}-{c['fim']}")
+            elif text[c["inicio"]:c["fim"]] != c["trecho"]:
+                problems.append(f"{where}: trecho difere de texto[inicio:fim]")
+            if c["tipo"] not in ("lei", "jurisprudencia"):
+                problems.append(f"{where}: tipo {c['tipo']!r}")
+            if c["classificacao"] not in ("real", "inventada", "incompleta"):
+                problems.append(f"{where}: classificacao {c['classificacao']!r}")
+            res = c["resolucao"]
+            if c["classificacao"] == "real":
+                cid = (res or {}).get("id_canonico") if isinstance(res, dict) else None
+                if not cid or (ids is not None and str(cid) not in ids):
+                    problems.append(f"{where}: real sem id_canonico válido ({cid!r})")
+            elif res is not None:
+                problems.append(f"{where}: resolucao deveria ser null em {c['classificacao']}")
+            if not (isinstance(c["confianca"], (int, float)) and 0 <= c["confianca"] <= 1):
+                problems.append(f"{where}: confianca {c['confianca']!r}")
+    extra = {p.stem for p in out_dir.glob("*.json")} - {t.stem for t in txt_dir.glob("*.txt")}
+    problems += [f"{e}.json: sem .txt correspondente" for e in sorted(extra)]
+    print(f"{len(list(txt_dir.glob('*.txt')))} documentos, {total} citações, {len(problems)} problemas")
+    return problems
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--db", type=Path, default=Path("data/desafio1_bracis.db"))
+    args = parser.parse_args()
+    problems = check(args.input, args.output, args.db)
+    for p in problems[:50]:
+        print(" ", p)
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,18 +1,34 @@
-# Execução offline do pipeline determinístico (só biblioteca padrão, sem GPU).
+# Imagem da submissão: regras + camada de NLP com LLM aberto do Hugging Face (model_manifest.json),
+# servido pelo Ollama DENTRO do contêiner, só em 127.0.0.1. Roda com --network none. Sem GPU, sem
+# pesos ou sem tempo, cai sozinha para a versão só com regras (Dockerfile.regras).
+#   python3 -m tools.baixar_modelo --dest modelos      # antes, com rede: revisão fixa + sha256
 #   docker build -t caca-alucinacoes .
-#   docker run --rm --network none -v "$PWD/data/txt:/data/in:ro" -v "$PWD/saida:/data/out" \
+#   docker run --rm --network none --gpus all \
+#     -v "$PWD/data/desafio1_bracis.db:/data/ref/desafio1_bracis.db:ro" -v "$PWD/modelos:/models:ro" \
+#     -v "$PWD/data/txt:/data/in:ro" -v "$PWD/saida:/data/out" \
 #     caca-alucinacoes --input /data/in --output /data/out
-# A base canônica vai dentro da imagem (data/desafio1_bracis.db); para usar
-# outra, monte-a e passe --db /caminho/da/base.db.
-FROM python:3.12-slim
+# GPU AMD: --build-arg OLLAMA_IMAGE=<imagem_rocm do manifesto> e, no run, --device /dev/kfd --device /dev/dri
+# no lugar de --gpus all. Pesos e base não vão na imagem (regra da competição): são montados.
+ARG OLLAMA_IMAGE=ollama/ollama:0.33.2@sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2
+FROM ${OLLAMA_IMAGE} AS ollama
+
+FROM python:3.12.3-slim@sha256:afc139a0a640942491ec481ad8dda10f2c5b753f5c969393b12480155fe15a63
+COPY --from=ollama /usr/bin/ollama /usr/bin/ollama
+COPY --from=ollama /usr/lib/ollama /usr/lib/ollama
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONHASHSEED=0
+    PYTHONHASHSEED=0 \
+    CACA_DB=/data/ref/desafio1_bracis.db \
+    CACA_MODEL_DIR=/models \
+    OLLAMA_MODELS=/tmp/ollama-models \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 WORKDIR /app
 COPY src/ /app/src/
-COPY data/desafio1_bracis.db /app/data/desafio1_bracis.db
+COPY model_manifest.json /app/model_manifest.json
+COPY docker/nlp/Modelfile /app/docker/nlp/Modelfile
 
-ENTRYPOINT ["python", "-m", "src.main"]
+ENTRYPOINT ["python", "-m", "src.launcher"]
 CMD ["--input", "/data/in", "--output", "/data/out"]

@@ -1,5 +1,6 @@
-# A imagem só precisa de src/ e da base canônica.
+# As imagens só levam o código e o manifesto; base e pesos são montados em runtime (regra da competição).
 *
 !src/
-!data/desafio1_bracis.db
+!model_manifest.json
+!docker/nlp/Modelfile
 **/__pycache__/

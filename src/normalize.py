@@ -264,6 +264,91 @@ def _looks_numeric(token: str) -> bool:
     return sum(c.isdigit() for c in token) * 2 >= len(token)
 
 
+# ------------------------------------------------------------------ números com OCR colado
+
+_UNIT = re.compile(r"[0-9OoQDlIi|SsgqGbBZzL]+")
+_UF_FIRST = {"8": "B", "5": "S", "0": "O", "6": "G"}  # dígito que o OCR pôs no lugar da 1ª letra da UF
+_SEP = set(" \t\n\r.-–—/\u00a0\u2009\u202f\u200b\u200c\u200d\u2060\u00ad\ufeff\u00ac")
+
+
+def _joins(gap: str) -> bool:
+    """Separador entre dois pedaços do mesmo número: pontuação, espaços e invisíveis; vírgula só colada
+    ("4O,2023" é um número; "33.235, 2021" são dois)."""
+    return all(c in _SEP or (c == "," and (gap[i + 1:i + 2] or "x") not in " \t\n\r")
+               for i, c in enumerate(gap))
+
+
+def number_groups(span: str) -> list[str]:
+    return [digits for digits, _, _ in number_group_spans(span)]
+
+
+def number_group_spans(span: str) -> list[tuple[str, int, int]]:
+    """Números do trecho, com OCR letra->dígito, cada um inteiro ("6O.685" -> "60685").
+
+    Pedaços (dígitos ou letras parecidas) ligados só por separadores formam um grupo. Pedaço sem
+    dígito de verdade só entra se for curto e encostar em outro com dígito ("l. 627.496", "2012 G 2O"),
+    e nunca se for parte de palavra ("no 685" não vira "0685"). Grupo colado em letras ("AgInt7S57430",
+    "185do", "Vinculante10") vale se tiver ao menos dois dígitos de verdade: um dígito solto entre
+    letras ("RE5P") é OCR de palavra, não número.
+    """
+    def letter(i: int) -> bool:  # "º" e "ª" são letras para o Python, mas aqui marcam ordinal
+        return 0 <= i < len(span) and span[i].isalpha() and span[i] not in "ºª°"
+
+    pieces = []
+    for m in _UNIT.finditer(span):
+        start, end, text = m.start(), m.end(), m.group()
+        # UF colada: o último caractere pode ser a 1ª letra da UF lida como número ("77.14oSP" -> 140 + SP;
+        # "- 8A" -> BA). Só quando ele e o seguinte formam uma UF; "86OPE" é 860 + PE.
+        if len(text) >= 1 and span[end:end + 1].isupper() and not span[end + 1:end + 2].isalpha():
+            first = _UF_FIRST.get(text[-1], text[-1])
+            if first + span[end] in UFS and (len(text) > 1 or not letter(start - 1)):
+                text, end = text[:-1], end - 1
+        if text:
+            pieces.append((start, end, text))
+    real = [sum(c.isdigit() for c in p[2]) for p in pieces]
+
+    def linked(i: int, j: int) -> bool:
+        a, b = sorted((i, j))
+        return _joins(span[pieces[a][1]:pieces[b][0]])
+
+    keep = []
+    for i, (start, end, text) in enumerate(pieces):
+        inside_word = letter(start - 1) or letter(end)
+        if real[i]:
+            # Um dígito só, com letra antes, é OCR de palavra ("RE5P", "Súmu1a"), a não ser que continue num
+            # número ("RESP6 .q89.q16" = 6.989.916); letra depois pode ser a UF.
+            continues = i + 1 < len(pieces) and real[i + 1] and linked(i, i + 1)
+            keep.append(real[i] >= 2 or not letter(start - 1) or continues)
+            continue
+        near_digits = any(0 <= j < len(pieces) and real[j] and linked(i, j) for j in (i - 1, i + 1))
+        keep.append(len(text) <= 2 and near_digits and not inside_word)
+    groups, current = [], []
+    for i, ok in enumerate(keep):
+        if ok and current and linked(current[-1], i):
+            current.append(i)
+        else:
+            if current:
+                groups.append(current)
+            current = [i] if ok else []
+    if current:
+        groups.append(current)
+    out = []
+    for group in groups:
+        digits = sum(real[i] for i in group)
+        glued = letter(pieces[group[0]][0] - 1) or letter(pieces[group[-1]][1])
+        text = "".join(pieces[i][2] for i in group).translate(OCR_DIGITS)
+        raw = span[pieces[group[0]][0]:pieces[group[-1]][1]]
+        if digits and (digits >= 2 or not glued) and text.isdigit() and not _DATE.fullmatch(raw):
+            out.append((text, pieces[group[0]][0], pieces[group[-1]][1]))
+    return out
+
+
+# Data não é número de processo: "17/5/2021", "20-04-2019", "17.12.2014", "0G/2021" (mês/ano).
+_D2 = r"[0-9OoQDlIi|SsgqGbBZzL]{1,2}"
+_DATE = re.compile(rf"\s*{_D2}\s*([/.\-])\s*{_D2}\s*\1\s*(?:[0-9OoQDlIi|SsgqGbBZzL]{{2}}|[0-9OoQDlIi|SsgqGbBZzL]{{4}})\s*"
+                   rf"|\s*{_D2}\s*/\s*[0-9OoQDlIi|SsgqGbBZzL]{{4}}\s*")
+
+
 def cnj_key(digits: str) -> tuple[int, str] | None:
     """Chave CNJ: (sequencial sem zeros à esquerda, DV+ano+J+TR+origem)."""
     digits = re.sub(r"\D", "", digits)
@@ -338,12 +423,14 @@ def diploma_key(text: str) -> str | None:
     """
     # Número e ano de lei com OCR ("13.l0s/2015", "G4/1990", "13.467/Z017"): letras
     # confundíveis viram dígitos com OCR_DIGITS, ainda com caixa (G→6, g→9).
+    # Quebra de linha/hífen depois do ponto do milhar ("13.-467", "9.-\n096", "I3. |05").
+    text = re.sub(r"(?<=[\dOolISsZzGgqQBb|])\.[\s\-]+(?=[\dOolISsZzGgqQBbD|])", ".", text)
     text = _LAW_NUMBER_OCR.sub(lambda m: m.group().translate(OCR_DIGITS), text)
     text = _LAW_YEAR_OCR.sub(lambda m: m.group().translate(OCR_DIGITS), text)
     t = canonical_words(text)
     t = re.sub(r"\blc[i1l]\b", "lei", t)  # "Lci": "e" lido como "c"
     # fold() já converteu "nº" em "no"; remove o marcador só antes de números.
-    t = re.sub(r"\bn[o.°]?\s*(?=\d)", "", t)
+    t = re.sub(r"\b(?:n|ri)[o.°]?\s*(?=\d)", "", t)  # "riº": OCR de "nº"
     t = re.sub(r"(\d)\.\s?(\d)", r"\1\2", t)
     t = re.sub(r"\s*/\s*", "/", t).strip(" ,.;:")
     # Anos de 2 dígitos em números de lei: "8.078/90" -> "8078/1990".
@@ -494,23 +581,23 @@ def chain_distance(a: tuple[str, ...], b: tuple[str, ...]) -> int:
 # formas mais específicas primeiro ("agravo em recurso especial" antes de
 # "recurso especial").
 CLASS_CODES = (
-    ("AREsp", r"agravo\s+em\s+(?:recurso\s+especial|resp\b)|a\.?\s*r\.?\s*esp\b|agresp\b"),
+    ("AREsp", r"agravo\s+[ec]m\s+(?:recurso\s+especial|resp\b)|a\.?\s*r\.?\s*esp\b|agresp\b"),
     ("REspe", r"recurso\s+especial\s+eleitoral|respe\b|arespei\b|(?:recurso|rec\.?|r\.?)\s*esp(?:ecial|\.)?\s+eleit"),
     ("REsp", r"recurso\s+especial|rec\.?\s*esp\b|r\.?\s*esp\b"),
     ("RHC", r"recurso\s+(?:ordinario\s+)?em\s+(?:habeas\s+corpus|hc\b)|rhc\b"),
     ("RMS", r"recurso\s+(?:ordinario\s+)?em\s+(?:mandado\s+(?:de\s+)?seguranca|ms\b)"
-            r"|recurso\s+ord\.\s+em\s+mandado|rms\b"),
+            r"|recurso\s+ord\.\s+[ec]m\s+mandado|rms\b"),
     ("HC", r"habeas\s+corpus|h\.?\s*c\b"),
     ("Rcl", r"reclamacao|recl\b|rcl\b"),
-    ("ARE", r"recurso\s+extraordinario\s+com\s+agravo|agravo\s+em\s+re\b|are\b"),
+    ("ARE", r"recurso\s+extraordinario\s+com\s+agravo|agravo\s+[ec]m\s+re\b|are\b"),
     ("RE", r"recurso\s+extraordinario|re\b"),
     ("AR", r"acao\s+rescisoria|ar\b"),
     ("SLS", r"suspensao\s+de\s+liminar"),
-    ("AI", r"agravo\s+de\s+instrumento(?!\s+em\s+recurso\s+de\s+revista)|ai\b"),
+    ("AI", r"agravo\s+de\s+instrumento(?!\s+[ec]m\s+recurso\s+de\s+revista)|ai\b"),
     ("RO", r"recurso\s+ordinario|ro\b"),
-    ("RSE", r"recurso\s+em\s+sentido\s+estrito|rse\b"),
+    ("RSE", r"recurso\s+[ec]m\s+sentido\s+estrito|rse\b"),
     ("APL", r"apelacao|apl\b"),
-    ("AIRR", r"agravo\s+de\s+instrumento\s+em\s+recurso\s+de\s+revista|airr\b"),
+    ("AIRR", r"agravo\s+de\s+instrumento\s+[ec]m\s+recurso\s+de\s+revista|airr\b"),
     ("ARR", r"recurso\s+de\s+revista\s+com\s+agravo|arr\b|rrag\b"),
     ("RR", r"recurso\s+de\s+revista|rr\b"),
     ("AgInt", r"agravo\s+interno|agint\b|ag\.\s*int\b"),

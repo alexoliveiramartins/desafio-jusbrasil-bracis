@@ -295,7 +295,8 @@ CNJ_NUMBER = CNJ_SEPARATOR.join((
     rf"(?<![A-Za-zÀ-ÿ])(?:[OolIGSBDQZ|]{{0,3}}\d|[lIOGSBDQZ|](?=\d)){_D}{{0,6}}", rf"{_D}{{2}}", rf"{_D}{{4}}", _D, rf"{_D}{{2}}", rf"{_D}{{4}}"
 ))
 # Número de lei, com OCR a partir do 2º caractere ("g.504" também: 1º seguido de ".").
-SHORT_NUMBER = rf"(?:\d|[lIOSgQZ|](?=[\d.]))[\dOolISgGBQZ|]*(?:\s*\.\s*[\dOolISgGBQZ|]+)*"
+# Número de lei: "9.504", "l3.467", "13.-467" (hífen de quebra de linha depois do ponto).
+SHORT_NUMBER = rf"(?:\d|[lIOSgQZ|](?=[\d.]))[\dOolISgGBQZ|]*(?:\s*\.[\s\-]*[\dOolISgGBQZ|]+)*"
 # Espaços entre milhares são aceitos só em grupos de três dígitos.
 # O formato de leis permanece separado para não ampliar essa família.
 # Dígitos podem vir trocados por letras parecidas ("21737l8", "1.528.4S5");
@@ -314,7 +315,10 @@ PROCESS_NUMBER = rf"(?:{CNJ_NUMBER}|{PROCESS_SHORT_NUMBER})"
 # Ano com OCR nos dígitos ("201g", "20l7").
 YEAR = r"(?:19|[2Z][0OD])[\dOolIgSBDQZ|]{2}(?!\w)"
 # "-5P" é a UF SP com OCR, não continuação do número.
-NUMBER_END = r"(?!\w)(?!\s*[.\-–]\s*(?!(?-i:5[A-Z])\b)\d)(?!,\d)"
+# O número continua depois de ponto/hífen com no máximo uma quebra de linha de cada lado ("33.-\n474");
+# linha em branco encerra o número ("067.\n\n3. DOS PEDIDOS" é outro parágrafo).
+_WS1 = r"[^\S\n]*(?:\n[^\S\n]*)?"
+NUMBER_END = rf"(?!\w)(?!{_WS1}[.\-–]{_WS1}(?!(?-i:5[A-Z])\b)\d)(?!,\d)"
 STATE_SUFFIX = rf"(?:\s*(?:[/–-]\s*{UF}\b|\({UF}\)))?"
 
 def ocr_alternatives(phrases: list[str]) -> str:
@@ -386,7 +390,7 @@ DIPLOMA_NAMES = [
 DIPLOMA = rf"""(?:
     {ocr_alternatives(DIPLOMA_NAMES)}
     | {CONSTITUICAO}
-    | CPC | CPP | CDC | CPM | CC | CP | CLT | CF(?:/[\dB]{2})?
+    | N?CPC | CPP | CDC | CPM | CC | CP | CLT | CF(?:/[\dB]{2})? | CR(?:FB)?(?:/[\dB]{2})?
 )"""
 LAW_NUMBER = (
     rf"(?:{ocr('Lei')}\s+(?:{ocr('Complementar')}\s+)?|LC\s+)"
@@ -401,7 +405,7 @@ ALINEA = r"(?:alínea\s+)?['\"‘’][a-z]['\"‘’]"
 ARTIGOS = re.compile(
     rf"\b(?:{ocr('artigo')}|{ocr('art')}\.?)\s+{ARTICLE_NUMBER}"
     rf"(?:\s*,\s*(?:{PARAGRAPH}|{INCISO}|{ALINEA}))*"
-    rf"\s*,?\s*d[oaã0]\s+(?:{LAW_NUMBER}|{DIPLOMA})(?!\w)",
+    rf"\s*,?\s*(?:d|cl)[oaã0]\s+(?:{LAW_NUMBER}|{DIPLOMA})(?!\w)",  # "cla CLT": OCR de "da"
     FLAGS,
 )
 
@@ -417,9 +421,12 @@ ARTIGOS_INVERTIDOS = re.compile(
 # (?-i:...) mantém a inicial maiúscula como sinal de continuação do nome.
 NAME_WORD = r"(?-i:[A-ZÀ-ÖØ-Þ][a-zA-ZÀ-ÖØ-öø-ÿ0-9]*)"
 RELATOR_NAME = rf"{NAME_WORD}(?:\s+(?:(?:de|da|do|dos|das)\s+)?{NAME_WORD})*"
+# Classe + ano + relator: "Rcl de 2021, Rel. Min. Rosa Weber"; vale para qualquer classe, inclusive as do
+# TST ("RR de 2016, Rel. Min. …"), e para "Rel."/"Min." com OCR ("Rcl. Mln.").
+DESCRIPTIVE_CLASS = rf"(?:{PROCESS_CLASS}|A?I?RR|ARR)"
 PROCESSOS_DESCRITIVOS = re.compile(
-    rf"\b{PROCESS_CLASS}\.?\s+(?:{ocr('do')}\s+{TRIBUNAL}\s*,?\s*)?"
-    rf"{ocr('de')}\s+{YEAR}\s*,\s*Rel\.\s*Min\.\s*{RELATOR_NAME}",
+    rf"\b{DESCRIPTIVE_CLASS}\.?\s+(?:{ocr('do')}\s+{TRIBUNAL}\s*,?\s*)?"
+    rf"{ocr('de')}\s+{YEAR}\s*,\s*{ocr('Rel')}\.\s*M[il1í]n\.\s*{RELATOR_NAME}",
     FLAGS,
 )
 
@@ -786,10 +793,19 @@ def _candidate(text: str, start: int, end: int, familia: str, tipo: str) -> dict
             "familia": familia, "origem": "ancora"}
 
 
+_SECTION_NUMBER = re.compile(r"\d{1,2}\.?\s*[.)\-–—]\s+[A-ZÀ-Ý]{2}")
+
+
+def _section_number(m: re.Match, text: str) -> bool:
+    """Número de título de seção ("3. DOS PEDIDOS", "2 - DO MÉRITO"): início de linha, 1–2 dígitos."""
+    line_start = text.rfind("\n", 0, m.start()) + 1
+    return not text[line_start:m.start()].strip() and bool(_SECTION_NUMBER.match(text, m.start()))
+
+
 def _process_anchors(text: str, taken: list[tuple[int, int]]) -> list[dict]:
     found = []
     for m in NUMBER_RE.finditer(text):
-        if not _is_process_number(m, text) or _overlaps(m.start(), m.end(), taken):
+        if not _is_process_number(m, text) or _overlaps(m.start(), m.end(), taken) or _section_number(m, text):
             continue
         floor = _floor(taken, m.start())
         digits = _digits(m.group())
@@ -869,7 +885,7 @@ _ENUM_ITEM = (
 _ENUM = re.compile(rf"(?:\s*,\s*|\s+(?:e|[aã])\s+|\s+){_ENUM_ITEM}", re.IGNORECASE)
 # Entre artigo e diploma: "do/da" (com OCR), vírgula, travessão ou só espaço.
 _PREPS = [re.compile(p, re.IGNORECASE) for p in (
-    r"\s*,?\s*(?:d[oaã0ó]s?|n[oa])\s+", r"\s*,\s*", r"\s*[–—-]\s*", r"\s+")]
+    r"\s*,?\s*(?:(?:d|cl)[oaã0ó]s?|n[oa])\s+", r"\s*,\s*", r"\s*[–—-]\s*", r"\s+")]  # "cla": OCR de "da"
 _PHRASE_WORD = re.compile(r"[^\s,;]+")
 # Palavras que podem compor o nome de um diploma (além de Maiúsculas, números
 # e conectores). Radicais gerais; nada específico de catálogo de teste.
@@ -883,14 +899,14 @@ _DIPLOMA_WORDS = (
 
 
 # Número de lei com OCR, "g.504/1997", "13.467/Z017", "(8.078/90)".
-_LAW_NUMBER_WORD = re.compile(r"\(?[\dlIOSGBgqZ|][\dlIOoSsGgqBbZz|.\s]*/\s*[\dOolIGgqSsZzBb|]{2,4}\)?")
+_LAW_NUMBER_WORD = re.compile(r"\(?[\dlIOSGBgqZ|][\dlIOoSsGgqBbZz|.\s\-]*/\s*[\dOolIGgqSsZzBb|]{2,4}\)?")  # "13.-467/2017"
 
 
 def _diploma_word(word: str) -> bool:
     bare = word.strip("().,;:'\"")
     if not bare:
         return True
-    if bare[0].isupper() or bare[0].isdigit() or bare in ("nº", "n.º", "n°", "/") or _LAW_NUMBER_WORD.fullmatch(bare):
+    if bare[0].isupper() or bare[0].isdigit() or bare in ("nº", "n.º", "n°", "riº", "ri°", "uº", "u°", "/") or _LAW_NUMBER_WORD.fullmatch(bare):
         return True
     return _diploma_content(bare) or fold(bare).translate(_GLUE_OCR) in CONNECTORS
 

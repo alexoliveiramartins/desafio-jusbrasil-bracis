@@ -13,13 +13,15 @@ a base (classify.py) e grava <documento_id>.json no formato do contrato:
     ]}
 
 Os offsets são codepoints do texto ORIGINAL (arquivo lido com newline="").
-Só biblioteca padrão; nenhuma chamada de rede.
+Só biblioteca padrão. Sem --nlp, nenhuma chamada de rede; com --nlp, só ao
+servidor LLM local (src/nlp.py), e sem ele o pipeline segue só com as regras.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import traceback
@@ -27,6 +29,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .classify import INCOMPLETA, REAL, CanonicalIndex, Resolution, resolve
+from .nlp import DEFAULT_MODEL, DEFAULT_URL, NLPLayer, from_args
 from .spans import clean, expand_spans, extract_citations, find_anchors, to_original
 
 
@@ -53,17 +56,24 @@ def extract(content: str, known_relators: list[frozenset] = ()) -> list[dict]:
     return citations
 
 
-def process_text(documento_id: str, content: str, index: CanonicalIndex, debug: bool = False) -> dict:
-    output = []
+def process_text(documento_id: str, content: str, index: CanonicalIndex, debug: bool = False,
+                 nlp: NLPLayer | None = None) -> dict:
+    citations = []
     for citation in extract(content, index.relator_tokens):
         # Contexto para desempate (ementa) e checagem do relator citado após o número.
         citation["contexto"] = content[max(0, citation["inicio"] - 400):citation["fim"] + 400]
         citation["contexto_depois"] = content[citation["fim"]:citation["fim"] + 160]
         try:
-            resolution = resolve(citation, index)
+            citation["resolution"] = resolve(citation, index)
         except Exception:  # noqa: BLE001 — uma citação nunca derruba o documento
             print(f"[erro] {documento_id} {citation['trecho']!r}\n{traceback.format_exc()}", file=sys.stderr)
-            resolution = Resolution(INCOMPLETA, None, 0.40, "erro_interno")
+            citation["resolution"] = Resolution(INCOMPLETA, None, 0.40, "erro_interno")
+        citations.append(citation)
+    if nlp is not None:
+        citations = nlp.refine(content, citations, index)
+    output = []
+    for citation in citations:
+        resolution = citation["resolution"]
         output.append({
             "inicio": citation["inicio"],
             "fim": citation["fim"],
@@ -78,14 +88,15 @@ def process_text(documento_id: str, content: str, index: CanonicalIndex, debug: 
     return {"documento_id": documento_id, "citacoes": output}
 
 
-def process_file(path: Path, index: CanonicalIndex, debug: bool = False) -> dict:
+def process_file(path: Path, index: CanonicalIndex, debug: bool = False, nlp: NLPLayer | None = None) -> dict:
     # newline="" preserva CRLF: os offsets são em codepoints do texto original.
     with path.open(encoding="utf-8", newline="") as stream:
         content = stream.read()
-    return process_text(path.stem, content, index, debug)
+    return process_text(path.stem, content, index, debug, nlp)
 
 
-DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "desafio1_bracis.db"
+# A base não vai dentro da imagem (regra da competição): no contêiner ela é montada e indicada por CACA_DB.
+DEFAULT_DB = Path(os.environ.get("CACA_DB") or Path(__file__).resolve().parent.parent / "data" / "desafio1_bracis.db")
 
 
 def main(argv=None) -> int:
@@ -93,7 +104,20 @@ def main(argv=None) -> int:
     parser.add_argument("--input", type=Path, default=Path("data/txt"), help="pasta com os .txt")
     parser.add_argument("--output", type=Path, default=Path("resultados"), help="pasta de saída dos JSONs")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="base canônica SQLite")
+    parser.add_argument("--nlp", action="store_true", help="liga a camada de NLP (LLM local via Ollama)")
+    parser.add_argument("--nlp-model", default=DEFAULT_MODEL, help="modelo GGUF do Hugging Face no Ollama")
+    parser.add_argument("--nlp-url", default=DEFAULT_URL, help="servidor Ollama")
+    parser.add_argument("--nlp-cache", type=Path, default=None, help="pasta de cache das respostas do modelo")
+    parser.add_argument("--nlp-budget-doc", type=float, default=40.0,
+                        help="média máxima de segundos por documento na camada (depois ela se desliga)")
+    parser.add_argument("--nlp-budget-total", type=float, default=3 * 3600.0,
+                        help="segundos totais na camada (depois ela se desliga)")
     args = parser.parse_args(argv)
+    if not args.db.is_file():
+        print(f"base canônica não encontrada: {args.db} (monte-a e passe --db ou CACA_DB)", file=sys.stderr)
+        return 2
+    nlp = from_args(args.nlp, args.nlp_url, args.nlp_model, args.nlp_cache,
+                    budget_doc_s=args.nlp_budget_doc, budget_total_s=args.nlp_budget_total)
 
     files = sorted(args.input.glob("*.txt"))
     if not files:
@@ -107,7 +131,7 @@ def main(argv=None) -> int:
     total = 0
     for n, path in enumerate(files, 1):
         doc_start = time.monotonic()
-        document = process_file(path, index)
+        document = process_file(path, index, nlp=nlp)
         classes = [c["classificacao"] for c in document["citacoes"]]
         total += len(classes)
         print(f"[{n:>3}/{len(files)}] {path.stem}: {len(classes)} citações "

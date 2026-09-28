@@ -354,3 +354,53 @@ class RobustnessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OcrRobustnessRulesTest(unittest.TestCase):
+    """Melhorias gerais das regras (valem para as duas versões e para o fallback)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.index = CanonicalIndex.from_sqlite(DB)
+
+    def classes(self, text):
+        return [(c["trecho"], c["classificacao"]) for c in process_text("t", text, self.index)["citacoes"]]
+
+    def test_robust_number_fallback(self):
+        # Número com OCR colado que a leitura principal não acha: o leitor robusto acha, só letra -> dígito.
+        for trecho in ["R-Rp \xa0n° 9Bb-96.2010.G.00.0000", "APL\r\n 70D0761-84 2021 7 00\tooO0 - BA",
+                       "TST-ARR-010109\xad0-90 2019 5 O1 00l5"]:
+            self.assertEqual(resolve({"familia": "processos", "trecho": trecho}, self.index).classificacao, "real")
+        # Número inventado continua inventado.
+        self.assertEqual(resolve({"familia": "processos", "trecho": "REsp 1.741.785/PR"}, self.index).classificacao,
+                         "inventada")
+
+    def test_descriptive_with_any_class(self):
+        self.assertEqual(self.classes("Veja o RR de 2016, Rel. Min. Augusto Carvalho, no ponto."),
+                         [("RR de 2016, Rel. Min. Augusto Carvalho", "real")])
+        self.assertEqual(self.classes("Veja o REsp de\n2019, Rcl. Min. Gurgel Faria, no ponto."),
+                         [("REsp de\n2019, Rcl. Min. Gurgel Faria", "real")])
+
+    def test_ocr_preposition_and_law_numbers(self):
+        self.assertEqual(self.classes("Nos termos do art. 818 cla CLT, cabe."), [("art. 818 cla CLT", "real")])
+        self.assertEqual(self.classes("Nos termos do artigo 102 da Lei nº 13.-467/2017, cabe."),
+                         [("artigo 102 da Lei nº 13.-467/2017", "inventada")])
+        self.assertEqual(self.classes("Veja o art 189 da Lei riº 9.504/19g7 no caso."),
+                         [("art 189 da Lei riº 9.504/19g7", "inventada")])
+
+    def test_common_diploma_aliases(self):
+        self.assertEqual(self.classes("Veja o art. 373 do NCPC no caso."), [("art. 373 do NCPC", "real")])
+        self.assertEqual(self.classes("Veja o art. 7°, caput da CR/88 no caso."), [("art. 7°, caput da CR/88", "real")])
+
+    def test_blank_line_ends_number_and_section_titles(self):
+        # O "3." do título da seção seguinte não continua o número nem vira processo.
+        self.assertEqual(self.classes("reafirmada no AgRg no RCL N.\n 67 067.\n\n3. DOS PEDIDOS\n\nEventual"),
+                         [("AgRg no RCL N.\n 67 067", "real")])
+        self.assertEqual(self.classes("do recurso.\n\n3. DOS PEDIDOS\n\nO acórdão"), [])
+        # Quebra simples no identificador, como na amostra oficial, continua valendo.
+        self.assertEqual(self.classes("a Rcl n° 33.-\n474 (MA), em 2020")[0][0], "Rcl n° 33.-\n474 (MA)")
+
+    def test_em_with_ocr_in_class_name(self):
+        out = process_text("t", "no Agravo\n cm Recurso Especial do STJ, de 2025, Rel. Min. SÉRGIO KUKINA.",
+                           self.index)["citacoes"]
+        self.assertEqual(out[0]["resolucao"]["id_canonico"], "5900603883")  # AREsp, não REsp
