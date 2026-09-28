@@ -16,3 +16,10 @@ data/stress/
 data/current/
 runs/
 reports/
+
+# Caches de ferramentas
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+tempCodeRunnerFile.py

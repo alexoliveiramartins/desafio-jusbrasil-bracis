@@ -176,7 +176,9 @@ congelamento do código.
 `baseline/` guarda referências que não fazem parte da solução: `poc/` (prova de conceito original)
 e `final_robust/` (solução da branch `feature/final-robust-solution`, só regex, com tabelas fixas
 de súmulas e artigos). A `final_robust` também acerta todo o dev, mas não generaliza: fica entre
-0,05 e 0,64 nos sintéticos, contra 0,88 a 1,10 da solução atual.
+0,05 e 0,64 nos sintéticos, contra 0,88 a 1,10 da solução atual. `alex_regex/` é o extrator só de
+spans da branch `alex` (`python3 -m baseline.alex_regex.benchmark_extractor`): acha 181 das 192
+citações do dev, e em 12 conjuntos (~6.000 citações) só 1 citação que a solução atual não acha.
 
 ## Resultados
 
