@@ -1,0 +1,6 @@
+# As imagens só levam o código e o manifesto; base e pesos são montados em runtime (regra da competição).
+*
+!src/
+!model_manifest.json
+!docker/nlp/
+**/__pycache__/
