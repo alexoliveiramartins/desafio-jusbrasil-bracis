@@ -87,7 +87,6 @@ def main() -> None:
     parser.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS))
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--docs", type=int, default=None, help="amostra balanceada por nível (seleção de modelo)")
-    parser.add_argument("--second-pass", action="store_true", help="segunda passada nas frases com pistas não cobertas")
     parser.add_argument("--extra-models", nargs="*", default=[], help="modelos do conjunto (além de --models)")
     parser.add_argument("--fresh-cache", type=Path, default=None,
                         help="pasta nova e vazia para o cache: toda resposta vem ao vivo do modelo (sem reaproveitar "
@@ -129,11 +128,11 @@ def main() -> None:
                     continue
                 normalize, recall = VARIANTS[variant]
                 extras = tuple(OllamaClient(args.url, m, cache_dir=cache_for(m)) for m in args.extra_models)
-                layer = NLPLayer(client, normalize=normalize, recall=recall, second_pass=args.second_pass,
+                layer = NLPLayer(client, normalize=normalize, recall=recall,
                                  extra_clients=extras)
                 outputs = run(split, gold, index, layer)
                 entry = row(score(gold, outputs)) | dict(changes(outputs)) | {"s_por_doc": round(seconds, 2)}
-                label = variant + ("+2p" if args.second_pass else "") + "".join(f"+{m.split('/')[-1]}" for m in args.extra_models)
+                label = variant + "".join(f"+{m.split('/')[-1]}" for m in args.extra_models)
                 report.setdefault(name, {})[f"{label}@{model}"] = entry
                 print(f"{name:<22} {label + '@' + model.split('/')[-1]:<48} {entry}", flush=True)
             save()

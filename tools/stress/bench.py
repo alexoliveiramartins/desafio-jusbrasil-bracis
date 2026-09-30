@@ -2,12 +2,9 @@
 
     python -m tools.stress.bench                                  # tudo (gera o que faltar)
     python -m tools.stress.bench --profiles limpo extremo --seeds 5
-    python -m tools.stress.bench --solutions lucas                # só a solução atual
 
-Soluções:
-  lucas         src.main (a solução do repositório), lendo como o CLI lê;
-  final_robust  baseline/final_robust/final_solution.py, lendo como ele lê
-                (Path.read_text, que converte CRLF e desloca offsets).
+Solução medida: src.main (a solução do repositório), lendo como o CLI lê. (A comparação com a
+solução anterior `final_robust` foi removida junto com ela; está no histórico do git.)
 
 Por execução: score oficial (kaggle_metric.avaliar), F1 por classe e τ por
 nível, recall de spans (IoU >= 0,5), spans exatos, predições espúrias (sem par
@@ -21,9 +18,7 @@ conjunto em iteração (ver README, "Avaliação sem overfitting").
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-import sqlite3
 import statistics
 import subprocess
 import time
@@ -31,8 +26,6 @@ import traceback
 from collections import Counter
 from datetime import date
 from pathlib import Path
-
-import pandas as pd
 
 import kaggle_metric as km
 from src.classify import CanonicalIndex
@@ -42,7 +35,6 @@ from tools.evaluation import DB, load_gold, score
 from . import BASE_SEED, COMPOSITE, OUT, PROFILES, generate, seeds_for, source_paths, split_dir
 
 REPORT = Path("relatorios/stress")
-FINAL_ROBUST = Path("baseline/final_robust/final_solution.py")
 
 
 # ------------------------------------------------------------------ soluções
@@ -57,22 +49,7 @@ class Lucas:
         return process_file(path, self.index)
 
 
-class FinalRobust:
-    name = "final_robust"
-
-    def __init__(self):
-        spec = importlib.util.spec_from_file_location("final_solution", FINAL_ROBUST)
-        self.fs = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.fs)
-        self.conn = sqlite3.connect(DB)
-        self.conn.row_factory = sqlite3.Row
-
-    def run(self, path: Path) -> dict:
-        text = path.read_text(encoding="utf-8")  # igual a final_solution.executar
-        return {"documento_id": path.stem, "citacoes": [self.fs.validar(self.conn, c) for c in self.fs.extrair(text)]}
-
-
-SOLUTIONS = {"lucas": Lucas, "final_robust": FinalRobust}
+SOLUTIONS = {"lucas": Lucas}
 
 
 # ------------------------------------------------------------------ medida

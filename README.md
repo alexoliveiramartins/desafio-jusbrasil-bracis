@@ -13,9 +13,13 @@ Há duas versões, com as mesmas regras de extração e resolução:
 
 Nas duas, **quem decide a classe é a consulta determinística à base**; o modelo só lê campos
 (tribunal, classe, número, diploma, artigo, ano, relator). A versão só com regras roda os 26
-documentos do dev em ~3 s; a camada de NLP acrescenta ~8–10 s por documento numa GPU de 16 GB.
+documentos do dev em ~3 s; a camada de NLP acrescenta ~18 s por documento com os dois modelos (~9 s só
+com o principal) numa GPU de 16 GB.
 Se a camada não puder rodar (sem pesos, sem servidor, sem tempo), a imagem da submissão cai
 sozinha para a versão só com regras.
+
+Documentação: [`docs/funcionamento_fim_a_fim.pdf`](docs/funcionamento_fim_a_fim.pdf) (como a solução
+funciona, do comando à saída, com um caso real) e [`docs/benchmarks/`](docs/benchmarks) (resultados e resumo em PDF).
 
 ## Avaliação final: ponto de entrada único
 
@@ -51,7 +55,6 @@ geram o mesmo arquivo, e o `run.sh` acima gera exatamente esse formato.
 python3 -m src.main --input data/txt --output resultados            # um JSON completo por documento
 python3 -m tools.validar_saida --input data/txt --output resultados # confere o contrato (0 problemas)
 python3 json_to_submission.py resultados submission.csv             # JSONs -> CSV do Kaggle
-python3 -m tools.empacotar_saidas --output resultados --zip saidas.zip   # .zip só com os JSONs, se pedirem
 ```
 
 **Entrega final (e-mail para desafio-bracis@jusbrasil.com.br até 01/10, 23h59):** nome da equipe e
@@ -125,7 +128,7 @@ o sha256 é conferido na partida.
 | Regra (e-mails da organização de 28/08 e 29/09/2026) | Como é cumprida |
 |---|---|
 | Ponto de entrada único: recebe o `.db` e a pasta dos `.txt` e gera a saída no formato da submissão | `bash run.sh <caminho_db> <pasta_txt> <arquivo_saida>` (seção acima); por dentro, a imagem segue o contrato `docker run <img> --input /data/in --output /data/out` |
-| Avaliação com um `.db` novo e documentos novos, no formato do dev | o índice (números próprios dos acórdãos, súmulas, dispositivos, relatores) é montado a partir do `.db` recebido a cada execução; nada é pré-calculado sobre a base de dev. As tabelas curadas de `src/classify.py` só valem para registros sem cabeçalho que existam na base recebida |
+| Avaliação com um `.db` novo e documentos novos, no formato do dev | o índice (números próprios dos acórdãos, súmulas, dispositivos, relatores) é montado a partir do `.db` recebido a cada execução; nada é pré-calculado sobre a base de dev |
 | Do zero, em máquina limpa; sem caminhos absolutos, passos manuais ou arquivos só da equipe | o `run.sh` baixa os pesos declarados e constrói a imagem se faltarem; todos os caminhos são relativos ao repositório ou vêm dos argumentos |
 | Pesos incluídos ou referenciados em revisão fixa, baixáveis antes da execução | [`model_manifest.json`](model_manifest.json): principal `unsloth/Qwen3-4B-Instruct-2507-GGUF` (revisão `a06e946…`; base `Qwen/Qwen3-4B-Instruct-2507`) e, no conjunto, `Qwen/Qwen3-8B-GGUF` (revisão `7c41481…`; base `Qwen/Qwen3-8B`), arquivos e sha256 fixos, todos Apache-2.0. Sem fine-tune, sem modelo gated, sem API |
 | GPU com até 24 GB de VRAM | dois modelos quantizados carregados juntos: ~12 GB de VRAM; 18,5 s/doc na imagem Docker numa GPU de 16 GB (~9 s/doc só com o principal), mais ~10 min de partida. A camada tem orçamento próprio (média de 40 s/doc, sem contar o 1º documento, que carrega os modelos; 3 h no total) e, se passar, o resto sai só com as regras |
@@ -142,7 +145,6 @@ pip install -r requirements.txt                            # pandas/numpy, só p
 python3 -m tools.evaluate --submission submission.csv      # métrica oficial contra data/goldenset.csv
 python3 -m tools.evaluate                                  # atalho: roda o pipeline e pontua o dev
 python3 -m tools.verify_official_data                      # base, gabarito e métrica batem com o snapshot oficial?
-python3 tools/audit_exact_spans.py --gold data/goldenset.csv --submission submission.csv --out relatorios/spans.csv
 ```
 
 ## Como funciona
@@ -290,12 +292,13 @@ crescente). Assim como os holdouts, é instrumento de **medida**: não ajuste re
 
 ```bash
 python3 -m tools.stress                      # gera data/stress/<perfil>_s<semente>/ (3 sementes)
-python3 -m tools.stress.bench                # solução atual × baseline final_robust -> relatorios/stress/benchmark.{json,md}
+python3 -m tools.stress.bench                # solução atual × perfis de ruído -> relatorios/stress/benchmark.{json,md}
 python3 -m tools.evaluate data/stress/extremo_s1000   # um conjunto pelo avaliador de sempre
 ```
 
 Medição de 26/09/2026, **antes** das melhorias de robustez abaixo (3 sementes, 192 citações por
-conjunto; "edição" = caracteres alterados ou inseridos sobre o total):
+conjunto; "edição" = caracteres alterados ou inseridos sobre o total). `final_robust` é uma solução anterior
+da equipe, só regex, medida para comparação:
 
 | Perfil | Edição | Solução atual: score | spans | τ | `final_robust`: score | spans | τ |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -319,12 +322,11 @@ conjuntos de iteração; a avaliação final segue o protocolo registrado antes 
 [`tools/stress/PROTOCOLO.md`](tools/stress/PROTOCOLO.md), com conjuntos inéditos gerados depois do
 congelamento do código.
 
-`baseline/` guarda referências que não fazem parte da solução: `poc/` (prova de conceito original)
-e `final_robust/` (solução da branch `feature/final-robust-solution`, só regex, com tabelas fixas
-de súmulas e artigos). A `final_robust` também acerta todo o dev, mas não generaliza: fica entre
-0,05 e 0,64 nos sintéticos, contra 0,88 a 1,10 da solução atual. `alex_regex/` é o extrator só de
-spans da branch `alex` (`python3 -m baseline.alex_regex.benchmark_extractor`): acha 181 das 192
-citações do dev, e em 12 conjuntos (~6.000 citações) só 1 citação que a solução atual não acha.
+Soluções anteriores da equipe foram comparadas e removidas do repositório (ficam no histórico do git):
+a prova de conceito original; a `final_robust` (branch `feature/final-robust-solution`, só regex, com
+tabelas fixas de súmulas e artigos), que também acerta todo o dev, mas não generaliza (0,05 a 0,64 nos
+sintéticos, contra 0,88 a 1,10 da solução atual); e o extrator só de spans da branch `alex`, que acha 181
+das 192 citações do dev e, em 12 conjuntos (~6.000 citações), só 1 citação que a solução atual não acha.
 
 ## Resultados
 

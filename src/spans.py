@@ -28,7 +28,6 @@ from .normalize import (
     expand_abbreviation,
     fold,
     LEGAL_VOCABULARY,
-    LEXICON,
     is_number_marker,
     name_tokens,
 )
@@ -509,10 +508,6 @@ _COURT_FORMS = {
     "TSE": [r"(?<![A-Za-z])T[S5]E(?![A-Za-z])", ocr("Tribunal Superior Eleitoral")],
     "STM": [r"(?<![A-Za-z])[S5]TM(?![A-Za-z])", ocr("Superior Tribunal Militar")],
 }
-# Apelidos e perífrases destilados (src/lexicon.json, gerado por tools/lexicon.py).
-for _form, _sigla in LEXICON.get("tribunal", {}).items():
-    if _sigla in _COURT_FORMS:
-        _COURT_FORMS[_sigla].append(rf"(?<![A-Za-z]){ocr(_form)}(?![A-Za-z])")
 # COURT (sem grupos nomeados) entra em outras regex; COURT_RE identifica a sigla.
 COURT = _HONORIFIC + "(?:" + "|".join("|".join(forms) for forms in _COURT_FORMS.values()) + ")"
 # Nome por extenso seguido da sigla: "Superior Tribunal de Justiça (STJ)".
@@ -580,15 +575,6 @@ _LEGAL_WORDS = set(
     interno regimental declaracao divergencia seguranca corpus processo
     liminar suspensao sentenca""".split()
 )
-# Classes e recursos destilados: sigla de uma palavra vira sigla; em forma de várias
-# palavras, a primeira dá sentido de processo e as demais são palavras jurídicas.
-for _form in list(LEXICON.get("classe", {})) + list(LEXICON.get("recurso", {})):
-    _words = [w for w in _form.replace(".", " ").split() if w not in CONNECTORS]
-    if len(_words) == 1 and len(_words[0]) <= 6:
-        ACRONYMS.add(_words[0])
-    elif _words:
-        CLASS_BEARING.add(_words[0])
-        _LEGAL_WORDS.update(_words[1:])
 # OCR em conectores curtos ("n0", "d0", "dc", "cm") e em siglas ("R5E").
 _GLUE_OCR = str.maketrans("0135c", "olese")
 _ACRONYM_OCR = str.maketrans("50", "so")
@@ -894,8 +880,7 @@ _DIPLOMA_WORDS = (
     "celetis", "process", "civil", "penal", "militar", "eleitoral", "consumid", "defesa",
     "federal", "republica", "diploma", "magna", "maior", "carta", "inelegib", "brasileir",
     "politic", "vigente", "lc",
-) + tuple(sorted({w for f in LEXICON.get("diploma", {}) for w in f.replace(".", " ").split()
-                  if len(w) >= 4 and w not in CONNECTORS}))
+)
 
 
 # Número de lei com OCR, "g.504/1997", "13.467/Z017", "(8.078/90)".

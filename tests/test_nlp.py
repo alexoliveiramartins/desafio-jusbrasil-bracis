@@ -202,17 +202,6 @@ class LayerTest(unittest.TestCase):
         by_text = {c["trecho"]: c["classificacao"] for c in out}
         self.assertNotEqual(by_text.get("STJ - Súmula 3"), "real")
 
-    def test_second_pass_rereads_uncovered_sentences(self):
-        from src.nlp import uncovered_windows
-        text = ("EGRÉGIO TRIBUNAL\n\nAutos nº 1051967-37.2016.3.02.7661\n\n"
-                "A matéria foi decidida no REsp 1.741.784/PR, sem ressalvas. Também no feito tombado sob 1.234.567, "
-                "oriundo do Paraná. Em 12/03/2020, com valor de R$ 155.135,93 e fls. 234/567, nada mudou.")
-        rules = process_text("t", text, self.index)["citacoes"]
-        windows = uncovered_windows(text, rules, 70)
-        self.assertEqual(len(windows), 1)
-        self.assertIn("tombado sob 1.234.567", windows[0])  # número sem citação que o cubra
-        self.assertNotIn("R$", windows[0])                   # data, valor, folhas e autos não são pista
-
     def test_ensemble_disagreement_keeps_rules(self):
         # Dois modelos leem o mesmo número de dois jeitos que levam a registros diferentes: nada muda.
         text = "Cumpre destacar o REsp 1.741.785/PR, de clareza solar."

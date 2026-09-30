@@ -133,8 +133,6 @@ def main(argv=None) -> int:
     parser.add_argument("--nlp-model", default=DEFAULT_MODEL, help="modelo GGUF do Hugging Face no Ollama")
     parser.add_argument("--nlp-url", default=DEFAULT_URL, help="servidor Ollama")
     parser.add_argument("--nlp-cache", type=Path, default=None, help="pasta de cache das respostas do modelo")
-    parser.add_argument("--nlp-second-pass", action="store_true",
-                        help="segunda passada do modelo nas frases com pistas de citação não cobertas")
     parser.add_argument("--nlp-extra-model", action="append", default=[],
                         help="outro modelo (conjunto): união para citações novas, acordo para normalizar")
     parser.add_argument("--nlp-budget-doc", type=float, default=40.0,
@@ -147,7 +145,7 @@ def main(argv=None) -> int:
         return 2
     nlp = from_args(args.nlp, args.nlp_url, args.nlp_model, args.nlp_cache,
                     budget_doc_s=args.nlp_budget_doc, budget_total_s=args.nlp_budget_total,
-                    second_pass=args.nlp_second_pass, extra_models=tuple(args.nlp_extra_model))
+                    extra_models=tuple(args.nlp_extra_model))
 
     files = sorted(args.input.glob("*.txt"))
     if not files:

@@ -46,7 +46,6 @@ SEVERITY = {"leve": 0.25, "moderado": 0.5, "pesado": 1.0, "extremo": 1.6}
 PROFILES: dict[str, dict[str, float]] = {"limpo": {}}
 PROFILES |= {f"so_{family}": {family: p} for family, p in PESADO.items()}
 PROFILES |= {name: {f: min(1.0, p * k) for f, p in PESADO.items()} for name, k in SEVERITY.items()}
-ABLATION = [name for name in PROFILES if name.startswith("so_")]
 COMPOSITE = list(SEVERITY)
 
 

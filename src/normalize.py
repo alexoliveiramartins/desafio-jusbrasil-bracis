@@ -7,10 +7,8 @@ extraído e devolvem chaves comparáveis com o índice da base canônica.
 from __future__ import annotations
 
 import difflib
-import json
 import re
 import unicodedata
-from pathlib import Path
 
 # Confusões típicas de OCR em posições de dígito.
 OCR_DIGITS = str.maketrans({
@@ -132,35 +130,6 @@ def is_number_marker(token: str) -> bool:
         return True
     t = re.sub(r"[.º°ª]", "", fold(token).replace("rn", "m").translate(str.maketrans("0c", "oe")))
     return t.startswith("n") and len(t) <= 6 and is_subsequence(t[1:], "umero")
-
-
-# ------------------------------------------------------------------ léxico destilado
-
-LEXICON_PATH = Path(__file__).with_name("lexicon.json")
-# Palavra genérica sozinha não é apelido ("tribunal", "recurso", "lei").
-_GENERIC = set(VOCAB_PRIORITY) | {"tribunal", "corte", "superior", "supremo", "suprema", "egregio", "colendo",
-                                  "excelso", "excelsa", "justica", "lei", "codigo", "carta", "diploma", "norma"}
-
-
-def load_lexicon(path: Path = LEXICON_PATH) -> dict[str, dict[str, str]]:
-    """Formas destiladas de um LLM por tools/lexicon.py: {tipo: {forma canônica: chave}}.
-
-    Vazio sem o arquivo. Formas de uma palavra genérica são ignoradas.
-    """
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    lexicon = {}
-    for kind, forms in data.items():
-        if isinstance(forms, dict):
-            canon = {canonical_words(f).strip(" .,;"): k for f, k in forms.items()}
-            lexicon[kind] = {f: k for f, k in canon.items() if f and not (" " not in f and f in _GENERIC)}
-    return lexicon
-
-
-def _lexicon_pattern(form: str) -> str:
-    return r"\s+".join(re.escape(w) for w in form.split())
 
 
 def _numeric_token(token: str) -> str | None:
@@ -391,10 +360,6 @@ DIPLOMAS = {
     "LC64/1990": ["lei complementar 64/1990", "lc 64/1990"],
 }
 _ALIASES = {alias: key for key, aliases in DIPLOMAS.items() for alias in aliases}
-# Carregado depois de _ALIASES: a canonicalização das formas usa expand_abbreviation.
-LEXICON = load_lexicon()
-for _form, _key in LEXICON.get("diploma", {}).items():
-    _ALIASES.setdefault(_form, _key)
 
 
 # Ano da lei que a base indexa. "CPC/73" ou "Código Civil de 1916" são OUTRAS
@@ -548,7 +513,6 @@ APPEAL_MARKERS = (
     # Agravo nas siglas hifenizadas do TST: "Ag-ARR", "TST-Ag-RR".
     ("AG", r"ag(?=\s*-\s*[a-z])|ag(?=a?i?rr\b|arr\b)"),
 )
-APPEAL_MARKERS += tuple((key, _lexicon_pattern(form) + r"\b") for form, key in LEXICON.get("recurso", {}).items())
 # (?:...) em volta: sem ele o (?<![a-z]) valeria só para a 1ª alternativa.
 _MARKERS = [(name, re.compile(rf"(?<![a-z])(?:{pattern})", re.IGNORECASE))
             for name, pattern in APPEAL_MARKERS]
@@ -602,7 +566,6 @@ CLASS_CODES = (
     ("RR", r"recurso\s+de\s+revista|rr\b"),
     ("AgInt", r"agravo\s+interno|agint\b|ag\.\s*int\b"),
 )
-CLASS_CODES += tuple((key, _lexicon_pattern(form) + r"\b") for form, key in LEXICON.get("classe", {}).items())
 # (?:...) em volta: sem ele "ro\b" casaria o fim de "ministro" (classe RO).
 _CLASS_PATTERNS = [(code, re.compile(rf"(?<![a-z])(?:{p})")) for code, p in CLASS_CODES]
 

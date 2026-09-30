@@ -601,13 +601,13 @@ class NLPLayer:
 
     def __init__(self, client: OllamaClient, *, normalize: bool = True, recall: bool = True,
                  chunk_chars: int = 3000, workers: int = 1, budget_doc_s: float = 40.0,
-                 budget_total_s: float = 3 * 3600.0, warmup_docs: int = 3, second_pass: bool = False,
-                 extra_clients: tuple[OllamaClient, ...] = (), max_windows: int = 8):
+                 budget_total_s: float = 3 * 3600.0, warmup_docs: int = 3,
+                 extra_clients: tuple[OllamaClient, ...] = ()):
         self.client, self.normalize, self.recall = client, normalize, recall
         self.chunk_chars, self.workers = chunk_chars, workers
-        # Segunda passada: releitura só das frases com pistas que ninguém cobriu. Modelos extras: conjunto
-        # (união para citações novas; normalização só se todos os modelos levarem ao mesmo registro).
-        self.second_pass, self.extra_clients, self.max_windows = second_pass, tuple(extra_clients), max_windows
+        # Modelos extras: conjunto (união para citações novas; normalização só se todos os modelos
+        # levarem ao mesmo registro).
+        self.extra_clients = tuple(extra_clients)
         self.budget_doc_s, self.budget_total_s, self.warmup_docs = budget_doc_s, budget_total_s, warmup_docs
         self.spent_s, self.docs, self.disabled, self.first_s = 0.0, 0, False, 0.0
 
@@ -669,14 +669,6 @@ class NLPLayer:
         state = _DocState(content)
         added: list[dict] = []
         self._absorb(items, citations, added, state, index)
-        if self.second_pass and self.recall:
-            windows = uncovered_windows(content, citations + added, state.header_end, self.max_windows)
-            if windows:
-                for client in (self.client, *self.extra_clients):
-                    data = client.chat_json(SYSTEM, PROMPT.format(texto="\n\n".join(windows)), SCHEMA)
-                    second = [(0, c) for c in (data or {}).get("citacoes") or []
-                              if isinstance(c, dict) and isinstance(c.get("trecho"), str)]
-                    self._absorb(second, citations, added, state, index)
         self._charge(time.monotonic() - clock)
         for c in citations + added:
             if c.pop("_conflito", False):
@@ -949,50 +941,13 @@ def _same_citation(a: tuple[int, int], b: tuple[int, int]) -> bool:
 
 
 class _DocState:
-    """O que a revisão de um documento reaproveita entre passadas."""
+    """O que a revisão de um documento reaproveita entre as leituras dos modelos."""
 
     def __init__(self, content: str):
         self.content = content
         self.text_sk, self.text_index = skeleton(content)
         self.header_end = _header_end(content)
         self.own_numbers = {_digits(m.group()) for m in re.finditer(r"[\d.\-]{15,}", content[:self.header_end])}
-
-
-_NOT_CITATION_BEFORE = re.compile(r"(?:R\$|fls?\.?|OAB|CPF|CNPJ|CEP|protocolo|autos)[\s:/nº°.]*$", re.IGNORECASE)
-_YEAR_NEAR_COURT = re.compile(r"(?:19|20)\d\d")
-
-
-def uncovered_windows(content: str, citations: list[dict], header_end: int, limit: int = 8) -> list[str]:
-    """Frases com pistas de citação que nenhuma citação cobre: número de 3+ dígitos (fora ano, data, valor,
-    folhas e cabeçalho), "art."/"artigo", "Súmula", ou sigla de tribunal com ano por perto."""
-    covered = [(c["inicio"], c["fim"]) for c in citations]
-
-    def free(a: int, b: int) -> bool:
-        return a >= header_end and not any(x < b and a < y for x, y in covered)
-
-    cues = []
-    for digits, a, b in number_group_spans(content):
-        if len(digits) >= 3 and not (len(digits) == 4 and digits[:2] in ("19", "20")) and free(a, b) \
-                and not _NOT_CITATION_BEFORE.search(content[max(0, a - 12):a]):
-            line_start = content.rfind("\n", 0, a) + 1
-            if not DISTRACTOR_LINE.match(content[line_start:a]):
-                cues.append((a, b))
-    cues += [(m.start(), m.end()) for m in _ART_CUE.finditer(content) if free(m.start(), m.end())]
-    cues += [(m.start(), m.end()) for m in _SUMULA_CUE.finditer(content) if free(m.start(), m.end())]
-    for m in re.finditer(r"(?<![A-Za-z])(?:[S5]T[FJM]|T[S5][TE])(?![A-Za-z])", content):
-        if free(m.start(), m.end()) and _YEAR_NEAR_COURT.search(content[m.start():m.end() + 60]):
-            cues.append((m.start(), m.end()))
-    windows = []
-    for a, b in sorted(cues):
-        left = max(content.rfind(". ", max(0, a - 200), a), content.rfind("\n\n", max(0, a - 200), a))
-        start = left + 2 if left >= 0 else max(0, a - 120)
-        right = [x for x in (content.find(". ", b, b + 200), content.find("\n\n", b, b + 200)) if x >= 0]
-        end = min(right) + 1 if right else min(len(content), b + 120)
-        if windows and start <= windows[-1][1]:
-            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
-        else:
-            windows.append((start, end))
-    return [content[a:b] for a, b in windows[:limit]]
 
 
 def _header_end(content: str) -> int:
@@ -1009,8 +964,7 @@ def _header_end(content: str) -> int:
 
 def from_args(enabled: bool, url: str, model: str, cache: Path | None, *, normalize: bool = True,
               recall: bool = True, workers: int = 1, budget_doc_s: float = 40.0,
-              budget_total_s: float = 3 * 3600.0, second_pass: bool = False,
-              extra_models: tuple[str, ...] = ()) -> NLPLayer | None:
+              budget_total_s: float = 3 * 3600.0, extra_models: tuple[str, ...] = ()) -> NLPLayer | None:
     """Camada pronta para uso, ou None (com aviso) se desligada ou sem servidor/modelo."""
     if not enabled:
         return None
@@ -1029,4 +983,4 @@ def from_args(enabled: bool, url: str, model: str, cache: Path | None, *, normal
         print(f"[nlp] modelos extras indisponíveis ({', '.join(missing)}): seguindo só com {model}", file=sys.stderr)
         extras = tuple(c for c in extras if c.model not in missing)
     return NLPLayer(client, normalize=normalize, recall=recall, workers=workers, budget_doc_s=budget_doc_s,
-                    budget_total_s=budget_total_s, second_pass=second_pass, extra_clients=extras)
+                    budget_total_s=budget_total_s, extra_clients=extras)

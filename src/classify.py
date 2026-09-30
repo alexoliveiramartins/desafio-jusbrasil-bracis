@@ -45,33 +45,8 @@ from .spans import article_diploma, courts_in, known_relator, ocr, relator_name
 # módulo extrai esses identificadores do texto de cada registro uma única vez e
 # monta índices em memória para o resolvedor.
 #
-# A cobertura da base é congelada (a mesma no conjunto cego), por isso súmulas
-# e dispositivos sem número legível no texto são mapeados em tabelas curadas.
-
-# Reserva para a versão antiga da base, sem cabeçalho "Súmula n. X do Y" /
-# "Artigo N do <diploma>". A base atual é lida pelos cabeçalhos.
-# Súmulas cujo texto não traz o número: doc_id -> (tribunal, número, vinculante).
-CURATED_SUMULAS = {
-    1289712966: ("STF", 10, True),
-    1431369957: ("TST", 331, False),
-}
-
-# Dispositivos de lei: doc_id -> diploma (chave de src/normalize.DIPLOMAS).
-CURATED_DISPOSITIVOS = {
-    28893055: "CPC",
-    10590194: "CPM",
-    10626510: "CF",
-    10710324: "CLT",
-    10647746: "CLT",
-    10641516: "CF",
-    10637358: "CLT",
-    11304039: "LC64/1990",
-    10641213: "CF",
-    10577194: "CE",
-    10718759: "CC",
-    10606184: "CDC",
-    10652044: "CPP",
-}
+# O índice é montado a partir da base recebida a cada execução (a avaliação final usa um .db
+# novo, no mesmo formato): súmulas e dispositivos são lidos pelos cabeçalhos.
 
 CNJ_IN_TEXT = re.compile(r"(\d{1,7})\s*-\s*(\d{2})\.(\d{4})\.(\d)\.(\d{2})\.(\d{4})")
 # Número próprio no cabeçalho de STJ/STF: "Nº 1.528.455 - RJ", "RECLAMAÇÃO 76.532".
@@ -93,7 +68,6 @@ TSE_HEADER = re.compile(r"\bN\s*[º°o]?\.?\s*(\d[\d\s.\-]{12,30}\d)")
 # STF: "AÇÃO RESCISÓRIA 2.614 DISTRITO FEDERAL RELATORA".
 STF_HEADER = re.compile(r"(\d{1,3}(?:\.\d{3})+|\d{2,7})\s+[A-ZÀ-Ú][A-ZÀ-Ú ]*?\s+RELATOR")
 HEADER_UF = re.compile(r"^\s*[-–]?\s*([A-Z]{2})\b")
-ARTIGO_IN_TEXT = re.compile(r"^\s*Art\.?\s*(\d+)")
 SUMULA_IN_TEXT = re.compile(r"SÚMULA\s+(\d+)")
 # Cabeçalhos da base atual: "Artigo 290 do Decreto-Lei nº 1.001, de 21 de ...",
 # "Súmula Vinculante n. 10 do STF".
@@ -155,10 +129,6 @@ class CanonicalIndex:
             header = ARTIGO_HEADER.match(texto)
             if header and diploma_key(header.group(2)):
                 self.dispositivos[(diploma_key(header.group(2)), int(header.group(1)))] = doc_id
-            elif CURATED_DISPOSITIVOS.get(int(doc_id)) and ARTIGO_IN_TEXT.match(texto):
-                # Formato antigo da base (sem cabeçalho): tabela curada.
-                diploma = CURATED_DISPOSITIVOS[int(doc_id)]
-                self.dispositivos[(diploma, int(ARTIGO_IN_TEXT.match(texto).group(1)))] = doc_id
             else:
                 self.unindexed.append(doc_id)
             self.records[doc_id] = Record(doc_id, tribunal, natureza, ano, relator)
@@ -166,12 +136,9 @@ class CanonicalIndex:
 
         if natureza == "sumula":
             header = SUMULA_HEADER.match(texto)
-            curated = CURATED_SUMULAS.get(int(doc_id))
             m = SUMULA_IN_TEXT.search(texto)
             if header:
                 self.sumulas[(header.group(3).upper(), int(header.group(2)), bool(header.group(1)))] = doc_id
-            elif curated:
-                self.sumulas[curated] = doc_id
             elif m and tribunal:
                 self.sumulas[(tribunal, int(m.group(1)), False)] = doc_id
             else:

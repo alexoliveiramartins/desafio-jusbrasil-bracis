@@ -283,3 +283,22 @@ conta para o total (3 h), mas fica fora da média por documento (`NLPLayer._char
 `test_cold_start_does_not_turn_layer_off`. Não muda nenhuma saída enquanto a camada está ligada.
 `src/nlp.py` passa a ter o sha256 `05a30af2c626e320312eef28b971d5db1f353a364f1ba578711f29d4d3ee3796`; os demais arquivos de `src/` não mudam.
 O `run.sh` também passou a reconstruir a imagem quando o código muda (etiqueta com o hash do código).
+
+### Limpeza de código sem uso (30/09; saídas idênticas)
+
+Removidos: o léxico opcional (`src/lexicon.json` nunca existiu, então todas as medições rodaram sem ele) e o seu
+gerador `tools/lexicon.py`; as tabelas curadas de `src/classify.py` para a versão antiga da base (nenhum registro da
+base atual as usava, e elas estavam presas a ids da base de dev); a segunda passada da camada (opção desligada e
+nunca avaliada: `--nlp-second-pass`, `uncovered_windows`). Prova de equivalência: impressão digital (sha256)
+das saídas antes e depois, em 1.732 documentos só com regras (42 conjuntos) e em 9 conjuntos com 4B+8B
+(respostas guardadas): 51 de 51 idênticas. Novos sha256 de `src/`:
+
+```
+17dc0f9193c7c7b0803da3abeafa498e5984fe7e248438c32da790f88cf99d93  src/classify.py
+d929b4e656c78b74be9a049a26254fc1b3539d1eebe39ff4e766197280b078d2  src/__init__.py
+e24b6a75e47a556a60fa4c1c0877a4f1531a96f9629967bb16e79c6642a50233  src/launcher.py
+e562fcdb5283a4b5e590a1d4a1b8460e97aee771c4175e4028b49dff1fa98e02  src/main.py
+2c72344292b55e7c1b0c00d711ba969818b25aa0fd68036ff883c475e19b8c3d  src/nlp.py
+9578af75c8e19a569a11322c6a512b23a9660fab34a29b74a318a1de3e58326e  src/normalize.py
+b9cba2f1bf905b689bf70014db0250b2bfa44a0823890c5308d687c263b86891  src/spans.py
+```
