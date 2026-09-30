@@ -1,14 +1,25 @@
-"""Entrypoint da imagem com NLP: sobe o Ollama local, registra o GGUF montado e roda o pipeline.
+r"""Ponto de entrada da imagem Docker com a camada de NLP.
 
-    docker run --rm --network none --gpus all \\
-      -v "$PWD/data/desafio1_bracis.db:/data/ref/desafio1_bracis.db:ro" -v "$PWD/modelos:/models:ro" \\
-      -v "$PWD/data/txt:/data/in:ro" -v "$PWD/saida:/data/out" \\
-      caca-alucinacoes-nlp --input /data/in --output /data/out
+Sobe o servidor Ollama dentro do contêiner, confere e registra os pesos montados e roda o
+pipeline (``src.main``) com a camada de NLP ligada. Normalmente é chamado pelo ``run.sh``;
+direto pelo Docker::
 
-Nenhuma chamada externa: o servidor escuta só em 127.0.0.1 dentro do contêiner, e os pesos vêm
-de /models (baixados antes, da revisão declarada em model_manifest.json; o sha256 é conferido
-aqui). Qualquer falha (sem pesos, hash divergente, servidor que não sobe) cai para a versão só com
-regras: o contêiner sempre produz as saídas. Só biblioteca padrão.
+    docker run --rm --network none --gpus all \
+      -v "$PWD/data/desafio1_bracis.db:/data/ref/desafio1_bracis.db:ro" \
+      -v "$PWD/modelos:/models:ro" -v "$PWD/data/txt:/data/in:ro" -v "$PWD/saida:/data/out" \
+      caca-alucinacoes --input /data/in --output /data/out
+
+Notes
+-----
+Nenhuma chamada externa: o servidor escuta só em 127.0.0.1 dentro do contêiner, e os pesos
+vêm de ``/models`` (baixados antes, da revisão declarada em ``model_manifest.json``; o sha256 é
+conferido aqui). Qualquer falha (sem pesos, hash divergente, servidor que não sobe) faz a
+execução seguir só com as regras: o contêiner sempre produz as saídas. Só biblioteca padrão.
+
+Variáveis de ambiente: ``CACA_MANIFEST`` (manifesto), ``CACA_MODEL_DIR`` (pesos, padrão
+``/models``), ``CACA_ENSEMBLE=0`` (só o modelo principal), ``CACA_MAX_LOADED_MODELS``
+(modelos carregados juntos, padrão 2), ``CACA_VERIFY_SHA=0`` (pula o sha256) e
+``CACA_OLLAMA_LOG`` (log do servidor, padrão ``/tmp/ollama.log``).
 """
 
 from __future__ import annotations
@@ -32,14 +43,33 @@ URL = f"http://{HOST}"
 
 
 class LauncherError(RuntimeError):
-    pass
+    """Falha ao preparar a camada de NLP; quem chama segue só com as regras."""
 
 
 def log(message: str) -> None:
+    """Escreve uma mensagem do launcher no stderr.
+
+    Parameters
+    ----------
+    message : str
+        Texto da mensagem; recebe o prefixo ``[launcher]``.
+    """
     print(f"[launcher] {message}", file=sys.stderr, flush=True)
 
 
 def sha256(path: Path) -> str:
+    """Calcula o sha256 de um arquivo, lendo em blocos de 4 MiB.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Arquivo a conferir (os GGUF têm alguns GB).
+
+    Returns
+    -------
+    str
+        Resumo sha256 em hexadecimal.
+    """
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1 << 22), b""):
@@ -48,6 +78,16 @@ def sha256(path: Path) -> str:
 
 
 def server_env() -> dict[str, str]:
+    """Monta o ambiente do servidor Ollama.
+
+    Returns
+    -------
+    dict of str to str
+        Ambiente do processo atual acrescido das variáveis do Ollama: escuta só em loopback, um
+        pedido por vez (o resultado não depende de lote), até ``CACA_MAX_LOADED_MODELS`` modelos
+        carregados juntos (padrão 2: principal e conjunto), modelos sempre carregados e
+        armazenamento em ``OLLAMA_MODELS`` (padrão ``/tmp/ollama-models``).
+    """
     return os.environ | {
         "OLLAMA_HOST": HOST,                 # só loopback
         "OLLAMA_NUM_PARALLEL": "1",          # um pedido por vez: resultado não depende de lote
@@ -58,6 +98,20 @@ def server_env() -> dict[str, str]:
 
 
 def wait_server(process: subprocess.Popen, timeout_s: float = 120.0) -> None:
+    """Espera o servidor responder em ``/api/version``.
+
+    Parameters
+    ----------
+    process : subprocess.Popen
+        Processo do ``ollama serve``.
+    timeout_s : float, default 120.0
+        Tempo máximo de espera, em segundos.
+
+    Raises
+    ------
+    LauncherError
+        Se o processo terminar antes de responder ou se o tempo acabar.
+    """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -71,8 +125,27 @@ def wait_server(process: subprocess.Popen, timeout_s: float = 120.0) -> None:
 
 
 def find_weights(model: dict) -> Path:
-    """O GGUF declarado dentro de CACA_MODEL_DIR (padrão /models), em qualquer layout de download:
-    pasta simples, `huggingface-cli download --local-dir` ou cache do HF (snapshots/<revisão>/)."""
+    """Localiza o GGUF declarado no manifesto dentro de ``CACA_MODEL_DIR`` (padrão ``/models``).
+
+    Aceita qualquer layout de download: o arquivo solto, ``huggingface-cli download --local-dir``
+    ou o cache do Hugging Face (``snapshots/<revisão>/``). Entre vários achados, prefere o que
+    está na pasta da revisão declarada.
+
+    Parameters
+    ----------
+    model : dict
+        Entrada do manifesto, com as chaves ``arquivo`` e ``revisao``.
+
+    Returns
+    -------
+    pathlib.Path
+        Caminho do GGUF.
+
+    Raises
+    ------
+    LauncherError
+        Se o arquivo não for encontrado.
+    """
     root = Path(os.environ.get("CACA_MODEL_DIR", "/models"))
     direct = root / model["arquivo"]
     if direct.is_file():
@@ -80,12 +153,17 @@ def find_weights(model: dict) -> Path:
     found = sorted(root.rglob(model["arquivo"]), key=lambda p: model["revisao"] not in str(p)) if root.is_dir() else []
     if not found:
         raise LauncherError(f"pesos {model['arquivo']} não encontrados em {root} "
-                            f"(baixe com tools/baixar_modelo.py e monte em /models)")
+                            f"(baixe com tools/download_models.py e monte em /models)")
     return found[0]
 
 
 def report_backend() -> None:
-    """Diz qual acelerador o Ollama achou (CUDA/NVIDIA, ROCm/AMD ou só CPU), pelo log do servidor."""
+    """Informa, pelo log do servidor, qual acelerador o Ollama encontrou.
+
+    Lê as linhas ``inference compute`` do log (``CACA_OLLAMA_LOG``) e registra a biblioteca e o
+    nome da GPU (CUDA/NVIDIA ou ROCm/AMD). Sem GPU visível, avisa que o modelo rodará em CPU e que
+    o orçamento de tempo tende a desligar a camada.
+    """
     log_path = Path(os.environ.get("CACA_OLLAMA_LOG", "/tmp/ollama.log"))
     time.sleep(1)
     found = []
@@ -102,7 +180,24 @@ def report_backend() -> None:
 
 
 def register(model: dict, modelfile: Path, name: str) -> None:
-    """Confere os pesos montados e registra o modelo no servidor."""
+    """Confere os pesos montados e registra o modelo no servidor.
+
+    Parameters
+    ----------
+    model : dict
+        Entrada do manifesto (``arquivo``, ``revisao``, ``sha256`` e ``hf_repo``).
+    modelfile : pathlib.Path
+        Modelfile do Ollama (template e parâmetros), sem a linha ``FROM``, que é acrescentada aqui
+        apontando para o GGUF montado.
+    name : str
+        Nome local do modelo no servidor (ex.: ``caca-nlp``).
+
+    Raises
+    ------
+    LauncherError
+        Se os pesos faltarem, se o sha256 divergir do manifesto (a conferência é desligável com
+        ``CACA_VERIFY_SHA=0``) ou se o ``ollama create`` falhar.
+    """
     gguf = find_weights(model)
     if os.environ.get("CACA_VERIFY_SHA", "1") != "0":
         start = time.monotonic()
@@ -118,9 +213,27 @@ def register(model: dict, modelfile: Path, name: str) -> None:
 
 
 def prepare(manifest: dict) -> tuple[subprocess.Popen, str, list[str]]:
-    """Sobe o servidor e registra o modelo principal e os do conjunto. Devolve (processo, principal, extras).
+    """Sobe o servidor e registra o modelo principal e os do conjunto.
 
-    Sem o principal, erro (a execução segue só com as regras). Sem um extra, segue sem ele.
+    Parameters
+    ----------
+    manifest : dict
+        Conteúdo de ``model_manifest.json``.
+
+    Returns
+    -------
+    process : subprocess.Popen
+        Processo do servidor Ollama.
+    principal : str
+        Nome local do modelo principal.
+    extras : list of str
+        Nomes locais dos modelos do conjunto que subiram (vazia com ``CACA_ENSEMBLE=0``).
+
+    Raises
+    ------
+    LauncherError
+        Se o modelo principal não puder ser preparado. Um modelo do conjunto que falhe só fica de
+        fora, com aviso.
     """
     model, runtime = manifest["modelo"], manifest["runtime"]
     find_weights(model)  # falha cedo, antes de subir o servidor
@@ -145,6 +258,19 @@ def prepare(manifest: dict) -> tuple[subprocess.Popen, str, list[str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Prepara a camada de NLP e roda o pipeline.
+
+    Parameters
+    ----------
+    argv : list of str, optional
+        Argumentos do pipeline (``--input``, ``--output``...). Padrão: ``sys.argv[1:]``.
+
+    Returns
+    -------
+    int
+        Código de saída do pipeline. Se a camada não puder ser preparada, o pipeline roda só com
+        as regras.
+    """
     from .main import main as pipeline
 
     argv = list(sys.argv[1:] if argv is None else argv)

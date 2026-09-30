@@ -1,4 +1,4 @@
 # O pipeline (src/) e as imagens Docker usam só a biblioteca padrão do Python (3.12.3).
-# Estas dependências, com versões fixas, são só para a avaliação local (kaggle_metric.py e tools/).
+# Estas dependências, com versões fixas, são só para a métrica oficial (kaggle_metric.py).
 pandas==3.0.5
 numpy==2.5.2

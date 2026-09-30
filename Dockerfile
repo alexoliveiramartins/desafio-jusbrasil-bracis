@@ -1,8 +1,8 @@
 # Imagem da submissão: regras + camada de NLP com LLM aberto do Hugging Face (model_manifest.json),
 # servido pelo Ollama DENTRO do contêiner, só em 127.0.0.1. Roda com --network none. Sem GPU, sem
-# pesos ou sem tempo, cai sozinha para a versão só com regras (Dockerfile.regras).
+# pesos ou sem tempo, cai sozinha para a versão só com regras (Dockerfile.rules).
 #
-#   python3 -m tools.baixar_modelo --dest modelos      # antes, com rede: revisão fixa + sha256
+#   python3 -m tools.download_models --dest modelos      # antes, com rede: revisão fixa + sha256
 #
 #   NVIDIA (padrão):  docker build -t caca-alucinacoes .
 #                     docker run --rm --network none --gpus all <volumes> caca-alucinacoes --input /data/in --output /data/out

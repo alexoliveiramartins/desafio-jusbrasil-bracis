@@ -1,3 +1,13 @@
+"""Confere se os dados locais são os do snapshot oficial de 15/09/2026.
+
+    python3 -m tools.verify_official_data [pasta] [--skip-hash]
+
+Compara o sha256 da base, do goldenset, da métrica, do conversor e do sample_submission com
+os do pacote oficial e confere as contagens: 26 .txt, 192 citações no gabarito (por nível e
+classe) e 1.014 documentos na base (996 acórdãos, 13 dispositivos, 5 súmulas). Arquivo que
+falte na pasta informada é procurado no layout deste repositório.
+"""
+
 from __future__ import annotations
 import argparse, csv, hashlib, sqlite3
 from pathlib import Path
@@ -21,10 +31,37 @@ REPO_LAYOUT = {
 }
 
 def locate(d: Path, name: str) -> Path:
+    """Caminho de um arquivo do snapshot: na pasta informada ou no layout do repositório.
+
+    Parameters
+    ----------
+    d : pathlib.Path
+        Pasta informada.
+    name : str
+        Nome do arquivo no pacote oficial (ou ``txt``, a pasta dos textos).
+
+    Returns
+    -------
+    pathlib.Path
+        ``d / name`` se existe ou se o nome não tem lugar conhecido no repositório; senão, o
+        caminho de ``REPO_LAYOUT``.
+    """
     p = d / name
     return p if p.exists() or name not in REPO_LAYOUT else REPO_LAYOUT[name]
 
 def sha256(path: Path) -> str:
+    """Calcula o sha256 de um arquivo, lendo em blocos.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Arquivo a conferir.
+
+    Returns
+    -------
+    str
+        Resumo sha256 em hexadecimal.
+    """
     h = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -32,6 +69,14 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 def main() -> int:
+    """Confere hashes e contagens e imprime o relatório.
+
+    Returns
+    -------
+    int
+        0 se tudo confere; 1 se algum arquivo falta, algum hash diverge (sem ``--skip-hash``)
+        ou alguma contagem difere.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("data_dir", type=Path, nargs="?", default=Path("data"))
     ap.add_argument("--skip-hash", action="store_true", help="Valida estrutura/contagens sem exigir exatamente o snapshot de 15/09/2026.")

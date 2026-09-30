@@ -1,28 +1,36 @@
-"""Camada de NLP opcional: um LLM aberto (Hugging Face, GGUF) revisa o que as regras acharam.
+"""Camada de NLP: modelos abertos (Hugging Face, GGUF) revisam o que as regras acharam.
+
+Uso::
 
     python -m src.main --input data/txt --output resultados --nlp
-    python -m src.main ... --nlp --nlp-model hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M
+    python -m src.main ... --nlp --nlp-extra-model hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M
 
-O modelo roda num servidor local (Ollama, API nativa) e lê cada trecho da peça
-uma vez, devolvendo em JSON as citações que encontrou: o trecho literal e os
-campos lidos (tribunal, classe, número, UF, diploma, artigo, ano, relator),
-já com o OCR corrigido. Com isso a camada faz duas coisas:
+Cada modelo roda num servidor local (Ollama, API nativa) e lê a peça em trechos, devolvendo em
+JSON as citações que encontrou: o trecho literal e os campos lidos (tribunal, classe, número,
+UF, diploma, artigo, ano, relator), já com o OCR corrigido. Com isso a camada faz duas coisas:
 
-  normalização  citação que as regras deixaram `inventada` ou `incompleta` é
-                reconsultada na base pelos campos do modelo;
-  recall        citação que as regras não extraíram entra como candidata.
+- normalização: uma citação que as regras deixaram ``inventada`` ou ``incompleta`` é consultada
+  de novo na base, pelos campos lidos;
+- recall: uma citação que as regras não extraíram entra como candidata.
 
+Com dois modelos (conjunto), as citações novas são a união das leituras, e a normalização só
+vale se as leituras não levarem a registros diferentes; em conflito, fica a resposta das regras.
+
+Notes
+-----
 O modelo nunca decide a classe: a consulta à base continua determinística
-(classify.resolve sobre uma forma canônica montada com os campos). E há
-guardas contra o erro grave (inventada -> real):
-  * o número do modelo precisa casar com o trecho caractere a caractere,
-    trocando só letra por dígito parecido (O->0, l->1, S->5...), nunca
-    dígito por dígito, e sem sobrar dígito antes ou depois;
-  * tribunal, classe e diploma escritos no trecho prevalecem sobre o modelo;
-  * nada que as regras resolveram como `real` é alterado.
+(``classify.resolve`` sobre uma forma canônica montada com os campos). Guardas contra o erro
+grave (``inventada`` -> ``real``):
 
-Sem servidor (ou com erro), a camada se desliga e o pipeline segue só com as
-regras. Só biblioteca padrão.
+- o número lido precisa ser um dos números do trecho, inteiro, trocando só letra por dígito
+  parecido (O->0, l->1, S->5...), nunca dígito por dígito;
+- tribunal, classe e diploma precisam de evidência no trecho;
+- números depois de palavras que não abrem citação ("Resolução nº", "nº de ordem", "fls.") e
+  o número dos autos do próprio documento são recusados;
+- nada que as regras resolveram como ``real`` é renormalizado.
+
+Sem servidor (ou com erro), a camada se desliga e o pipeline segue só com as regras. Só
+biblioteca padrão.
 """
 
 from __future__ import annotations
@@ -47,7 +55,7 @@ from .spans import _ART_CUE, _ENUM, _PREPS, _SUMULA_CUE, _longest_diploma, clean
 DEFAULT_MODEL = "hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M"
 DEFAULT_URL = "http://127.0.0.1:11434"
 
-# Confiança das decisões da camada, medida nos conjuntos de iteração completos (28/09/2026, ~7.000 citações):
+# Confiança das decisões da camada, medida em conjuntos sintéticos rotulados pela base (28/09/2026, ~7.000 citações):
 # real_nlp 9/9, inventada_nlp 11/11, citações novas 59/59. Com margem: o sintético é mais fácil que o cego.
 NLP_CONFIDENCE = {"real_nlp": 0.92, "inventada_nlp": 0.92, "incompleta_nlp": 0.85, "novo": 0.92}
 
@@ -137,9 +145,30 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 class OllamaClient:
-    """Cliente mínimo da API nativa do Ollama (/api/chat), com cache opcional em disco.
+    """Cliente mínimo da API nativa do Ollama (``/api/chat``), com cache opcional em disco.
 
-    Só aceita servidor local (regra da competição: nenhuma chamada externa em runtime).
+    Só aceita servidor local (regra da competição: nenhuma chamada externa na execução).
+
+    Parameters
+    ----------
+    url : str, default DEFAULT_URL
+        Endereço do servidor; precisa ser local (127.0.0.1, localhost ou ::1).
+    model : str, default DEFAULT_MODEL
+        Nome do modelo no servidor.
+    timeout_s : float, default 120.0
+        Tempo máximo de cada pedido, em segundos.
+    cache_dir : pathlib.Path, optional
+        Pasta de cache das respostas (só para medições de laboratório); a chave é o pedido inteiro,
+        sem o teto de tokens.
+    num_ctx : int, default 8192
+        Tamanho do contexto do modelo.
+    num_predict : int, default 4096
+        Teto de tokens gerados, contra laço de repetição.
+
+    Raises
+    ------
+    ValueError
+        Se o servidor não for local.
     """
 
     def __init__(self, url: str = DEFAULT_URL, model: str = DEFAULT_MODEL, timeout_s: float = 120.0,
@@ -152,6 +181,13 @@ class OllamaClient:
             cache_dir.mkdir(parents=True, exist_ok=True)
 
     def available(self) -> bool:
+        """Diz se o servidor responde e tem o modelo.
+
+        Returns
+        -------
+        bool
+            ``True`` se ``/api/tags`` lista o modelo.
+        """
         try:
             with urllib.request.urlopen(f"{self.url}/api/tags", timeout=5) as response:
                 models = {m["name"] for m in json.loads(response.read())["models"]}
@@ -161,6 +197,25 @@ class OllamaClient:
 
     def chat_json(self, system: str, user: str, schema: dict) -> dict | None:
         # Decodificação determinística: gulosa (temperature 0) e semente fixa; um pedido por vez no servidor.
+        """Faz um pedido ao modelo com saída JSON restrita por schema.
+
+        A decodificação é determinística: gulosa (temperatura 0), semente 42 e sem raciocínio
+        ("think" desligado); o servidor atende um pedido por vez.
+
+        Parameters
+        ----------
+        system : str
+            Mensagem de sistema.
+        user : str
+            Mensagem do usuário (o prompt com o trecho).
+        schema : dict
+            JSON Schema da resposta (``format`` do Ollama).
+
+        Returns
+        -------
+        dict or None
+            A resposta decodificada; ``None`` se o servidor falhar ou a resposta não for um objeto JSON.
+        """
         payload = {"model": self.model, "stream": False, "think": False, "format": schema,
                    "options": {"temperature": 0, "seed": 42, "num_ctx": self.num_ctx},
                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
@@ -196,9 +251,22 @@ _SKELETON = {"o": "0", "q": "6", "g": "6", "9": "6", "l": "1", "i": "1", "|": "1
 
 
 def skeleton(text: str) -> tuple[str, list[int]]:
-    """Texto só com letras/dígitos, sem acento, minúsculo e com confusões de OCR unificadas.
+    """Reduz o texto a um esqueleto para comparação tolerante a OCR.
 
-    Devolve também, para cada caractere do esqueleto, o índice no texto original.
+    Só letras e dígitos, sem acento, em minúsculas e com as confusões de OCR unificadas
+    (o/0, l/i/1, s/5, rn -> m, ri -> n...).
+
+    Parameters
+    ----------
+    text : str
+        Texto de entrada.
+
+    Returns
+    -------
+    sk : str
+        O esqueleto.
+    index : list of int
+        Para cada caractere do esqueleto, o índice no texto original.
     """
     out, index = [], []
     i, n = 0, len(text)
@@ -218,7 +286,28 @@ def skeleton(text: str) -> tuple[str, list[int]]:
 
 
 def align(text_sk: str, text_index: list[int], trecho: str, min_ratio: float = 0.86) -> list[tuple[int, int]]:
-    """Todas as ocorrências do trecho no texto (offsets originais); aproximadas se não houver exata."""
+    """Localiza no documento todas as ocorrências do trecho lido pelo modelo.
+
+    Compara pelos esqueletos (:func:`skeleton`); sem ocorrência exata, procura a mais parecida a
+    partir de âncoras no começo ou no fim do trecho.
+
+    Parameters
+    ----------
+    text_sk : str
+        Esqueleto do documento.
+    text_index : list of int
+        Índices do esqueleto no texto original.
+    trecho : str
+        Trecho copiado pelo modelo.
+    min_ratio : float, default 0.86
+        Semelhança mínima para aceitar uma ocorrência aproximada.
+
+    Returns
+    -------
+    list of tuple of (int, int)
+        Spans (início, fim) no texto original; vazia se o trecho não estiver no documento (o que o
+        modelo inventar é descartado aqui).
+    """
     t_sk, _ = skeleton(trecho)
     if len(t_sk) < 5:
         return []
@@ -252,7 +341,24 @@ _LETTER_NUMBER = re.compile(r"(?<![\w.\-/])[OoQDlIi|SsgqGbBZzL]{2,}(?![\w.\-/])"
 
 
 def digits_in_span(digits: str, span: str) -> bool:
-    """O número do modelo é um dos números do trecho, inteiro, só com troca letra->dígito?"""
+    """Confere se o número lido pelo modelo é um dos números do trecho.
+
+    O número precisa estar inteiro no trecho, só com troca letra -> dígito parecido (nunca dígito
+    por dígito, nem sobrando dígito antes ou depois). Um número todo em letras parecidas
+    ("Súmula Vinculante lBB" = 188) também vale, se for uma palavra isolada.
+
+    Parameters
+    ----------
+    digits : str
+        Dígitos lidos pelo modelo.
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    bool
+        ``True`` se o número está no trecho.
+    """
     if not digits:
         return False
     wanted = {digits, digits.lstrip("0") or "0"}
@@ -263,7 +369,20 @@ def digits_in_span(digits: str, span: str) -> bool:
 
 
 def _name_in_span(relator: str, span: str) -> bool:
-    """Cada token do nome lido pelo modelo aparece no trecho (tolerando OCR)."""
+    """Confere se cada token do nome lido pelo modelo aparece no trecho, tolerando OCR.
+
+    Parameters
+    ----------
+    relator : str
+        Nome lido pelo modelo.
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    bool
+        ``True`` se todos os tokens do nome aparecem.
+    """
     tokens = name_tokens(relator)
     if not tokens:
         return False
@@ -294,15 +413,41 @@ CLASS_EVIDENCE = {
 
 
 def _has_evidence(stems: list[str], span: str) -> bool:
-    """Algum radical aparece no trecho? Siglas curtas como palavra inteira; nomes como substring.
+    """Diz se algum radical aparece no trecho.
 
-    As duas comparações usam o esqueleto (OCR unificado): "RE5P" é "resp", "Rc1" é "rcl".
+    Siglas curtas contam como palavra inteira; nomes, como substring. As comparações usam o
+    esqueleto: "RE5P" é "resp", "Rc1" é "rcl".
+
+    Parameters
+    ----------
+    stems : list of str
+        Radicais procurados.
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    bool
+        ``True`` se há evidência de algum radical.
     """
     return _evidence_length(stems, span) > 0
 
 
 def _evidence_length(stems: list[str], span: str) -> int:
-    """Tamanho do maior radical com evidência no trecho (0 = nenhum)."""
+    """Mede o maior radical com evidência no trecho.
+
+    Parameters
+    ----------
+    stems : list of str
+        Radicais procurados.
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    int
+        Tamanho (no esqueleto) do maior radical encontrado; 0 se nenhum.
+    """
     words = {skeleton(w)[0] for w in re.split(r"[^\w.]+", span) if w}
     words |= {skeleton(w.replace(".", ""))[0] for w in re.split(r"\s+", span) if "." in w}  # "R.Esp." -> resp
     span_sk = skeleton(span)[0]
@@ -338,10 +483,24 @@ _BLOCKERS = {"ordem", "resolucao", "portaria", "ato", "instrucao", "provimento",
 
 
 def _number_after_citation_words(span: str, digits: str) -> bool:
-    """O número vem depois de classe/recurso/tribunal ("REsp nº 1.234", "Reclamação Constitucional n. 64.895")
-    e não de outra coisa ("Resolução nº 188", "nº de ordem 295")? Volta pelas palavras antes do número: palavra de
-    bloqueio recusa; vocabulário de citação aceita; até 3 palavras desconhecidas ("Cível") no caminho.
-    CNJ completo se identifica sozinho."""
+    """Confere se o número vem depois de classe, recurso ou tribunal, e não de outra coisa.
+
+    Volta pelas palavras antes do número: palavra de bloqueio ("Resolução", "ordem", "fls.")
+    recusa; vocabulário de citação ("REsp", "Reclamação Constitucional") aceita; até 3 palavras
+    desconhecidas ("Cível") no caminho. Um CNJ completo se identifica sozinho.
+
+    Parameters
+    ----------
+    span : str
+        Trecho da citação.
+    digits : str
+        Número lido pelo modelo.
+
+    Returns
+    -------
+    bool
+        ``True`` se o número é de um processo citado.
+    """
     groups = [g for g in number_group_spans(span) if not (len(g[0]) == 4 and g[0][:2] in ("19", "20"))]
     if any(len(g[0]) >= 18 for g in groups):
         return True
@@ -367,13 +526,37 @@ def _number_after_citation_words(span: str, digits: str) -> bool:
 
 
 def _best_evidence_diploma(span: str) -> str | None:
-    """O único diploma da base com evidência no trecho, se houver só um."""
+    """Identifica o único diploma da base com evidência no trecho.
+
+    Parameters
+    ----------
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    str or None
+        Chave do diploma, se houver exatamente um com evidência.
+    """
     found = [d for d in DIPLOMA_TEXT if _diploma_evidence(d, span)]
     return found[0] if len(found) == 1 else None
 
 
 def _best_evidence_class(span: str) -> str | None:
-    """Classe com o radical mais longo que aparece no trecho ("recurso em habeas" > "habeas"); empate = None."""
+    """Identifica a classe com o radical mais longo presente no trecho.
+
+    "recurso em habeas" vence "habeas"; empate entre classes diferentes não decide.
+
+    Parameters
+    ----------
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    str or None
+        Sigla da classe; ``None`` sem evidência ou em empate.
+    """
     scored = sorted(((_evidence_length(stems, span), cls) for cls, stems in CLASS_EVIDENCE.items()), reverse=True)
     if not scored or scored[0][0] == 0 or (len(scored) > 1 and scored[1][0] == scored[0][0]):
         return None
@@ -381,7 +564,22 @@ def _best_evidence_class(span: str) -> str | None:
 
 
 def _fuzzy_in(needle: str, hay: str, cutoff: float = 0.8) -> bool:
-    """Nome longo com OCR pesado ("Reccurso em Hqbcas" ~ "recurso em habeas"): semelhança >= cutoff."""
+    """Procura um nome longo com OCR pesado no texto ("Reccurso em Hqbcas" ~ "recurso em habeas").
+
+    Parameters
+    ----------
+    needle : str
+        Esqueleto do nome procurado.
+    hay : str
+        Esqueleto do texto.
+    cutoff : float, default 0.8
+        Semelhança mínima.
+
+    Returns
+    -------
+    bool
+        ``True`` se alguma janela do texto é parecida o bastante.
+    """
     n = len(needle)
     for start in range(0, max(1, len(hay) - n + 3)):
         for size in (n - 2, n, n + 2):
@@ -392,6 +590,20 @@ def _fuzzy_in(needle: str, hay: str, cutoff: float = 0.8) -> bool:
 
 
 def _class_evidence(classe: str | None, span: str) -> bool:
+    """Diz se a classe tem evidência no trecho.
+
+    Parameters
+    ----------
+    classe : str or None
+        Sigla da classe.
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    bool
+        ``True`` se algum radical da classe aparece.
+    """
     return _has_evidence(CLASS_EVIDENCE.get(classe or "", []), span)
 
 
@@ -406,6 +618,20 @@ DIPLOMA_EVIDENCE = {
 
 
 def _diploma_evidence(diploma: str | None, span: str) -> bool:
+    """Diz se o diploma tem evidência no trecho (nome, sigla, apelido ou número da lei).
+
+    Parameters
+    ----------
+    diploma : str or None
+        Chave do diploma.
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    bool
+        ``True`` se algum radical do diploma aparece.
+    """
     return _has_evidence(DIPLOMA_EVIDENCE.get(diploma or "", []), span)
 
 
@@ -418,6 +644,18 @@ _GLUED_COURT = re.compile(r"(?<![A-Z0-9])((?:[S5]T[FJM])|(?:T[S5][TE]))(?![A-Z0-
 
 
 def _is_year(group: str) -> bool:
+    """Diz se o grupo de dígitos é um ano (19xx ou 20xx).
+
+    Parameters
+    ----------
+    group : str
+        Dígitos.
+
+    Returns
+    -------
+    bool
+        ``True`` para anos de 4 dígitos.
+    """
     return len(group) == 4 and group[:2] in ("19", "20")
 
 
@@ -428,8 +666,21 @@ _SUMULA_SK = "5nmn1a"  # esqueleto de "súmula"
 
 
 def _sumula_cue_end(plain: str) -> int | None:
-    """Fim da pista de súmula no trecho: "Súmula", "Súm.", "verbete", "enunciado", "SV", ou a palavra "súmula"
-    corrompida por OCR ("Súmuula", "Súmla", "5umulla", "Suu\nmla", "aSúm.")."""
+    r"""Localiza o fim da pista de súmula no trecho.
+
+    Aceita "Súmula", "Súm.", "verbete", "enunciado", "SV" e a palavra "súmula" corrompida por OCR
+    ("Súmuula", "Súmla", "5umulla", "Suu\nmla", "aSúm.").
+
+    Parameters
+    ----------
+    plain : str
+        Trecho já limpo.
+
+    Returns
+    -------
+    int or None
+        Posição logo depois da pista; ``None`` se não houver.
+    """
     if cue := _SUMULA_CUE.search(plain) or re.search(r"(?-i:\bSV\b)", plain):
         return cue.end()
     words = list(re.finditer(r"[^\W\d_]+", plain))
@@ -447,7 +698,23 @@ def _sumula_cue_end(plain: str) -> int | None:
 
 
 def _tribunal(item: dict, span: str) -> str | None:
-    """Tribunal escrito no trecho; o do modelo só vale se o trecho fala de um tribunal por apelido."""
+    """Decide o tribunal da citação.
+
+    Vale o tribunal escrito no trecho (sigla ou extenso, também colado: "doSTJ"); o do modelo só
+    vale se o trecho fala de um tribunal por apelido ("Corte Cidadã").
+
+    Parameters
+    ----------
+    item : dict
+        Citação lida pelo modelo.
+    span : str
+        Trecho (ou trecho com entorno curto).
+
+    Returns
+    -------
+    str or None
+        Sigla do tribunal.
+    """
     courts = courts_in(span)
     if courts:
         return courts[0]
@@ -457,22 +724,61 @@ def _tribunal(item: dict, span: str) -> str | None:
 
 
 def _digits(value) -> str:
-    """Dígitos de um campo do modelo; letras parecidas que ele copiou do OCR viram dígito ("1BB" -> 188)."""
+    """Extrai os dígitos de um campo do modelo, convertendo letras parecidas ("1BB" -> 188).
+
+    Parameters
+    ----------
+    value : object
+        Campo lido pelo modelo (texto, número ou ``None``).
+
+    Returns
+    -------
+    str
+        Só os dígitos.
+    """
     return re.sub(r"\D", "", str(value or "").translate(OCR_DIGITS))
 
 
 def _fmt_number(digits: str) -> str:
+    """Formata um número de processo para a forma canônica.
+
+    Parameters
+    ----------
+    digits : str
+        Dígitos do número.
+
+    Returns
+    -------
+    str
+        CNJ ``NNNNNNN-DD.AAAA.J.TR.OOOO`` (20 dígitos) ou número curto com ponto de milhar.
+    """
     if len(digits) == 20:
         return f"{digits[:7]}-{digits[7:9]}.{digits[9:13]}.{digits[13]}.{digits[14:16]}.{digits[16:]}"
     return f"{int(digits):,}".replace(",", ".")
 
 
 def canonical(item: dict, span: str, context: str | None = None) -> tuple[str, list[str]] | None:
-    """(família, formas canônicas) montadas com os campos do modelo, depois das guardas; None se não der.
+    """Monta a forma canônica da citação com os campos do modelo, depois das guardas.
 
-    Mais de uma forma quando o modelo e o trecho divergem (ex.: classe): o chamador só aceita se todas
-    levarem à mesma resposta. Dígitos são conferidos só no trecho; `context` (o trecho com um entorno curto)
-    serve de evidência de tribunal, classe e diploma.
+    Parameters
+    ----------
+    item : dict
+        Citação lida pelo modelo (``tipo``, ``numero``, ``classe``, ``tribunal``...).
+    span : str
+        Trecho da citação no documento; os dígitos são conferidos só nele.
+    context : str, optional
+        O trecho com um entorno curto; serve de evidência de tribunal, classe e diploma.
+
+    Returns
+    -------
+    tuple of (str, list of str) or None
+        A família e as formas canônicas; ``None`` se as guardas recusarem.
+
+    Notes
+    -----
+    Há mais de uma forma quando modelo e trecho divergem (ex.: na classe); quem chama só aceita se
+    todas levarem à mesma resposta (:func:`resolve_forms`). Se o número lido não estiver no
+    trecho, vale o único número candidato do próprio trecho.
     """
     tipo = item.get("tipo")
     evidence = context or span
@@ -580,7 +886,24 @@ def canonical(item: dict, span: str, context: str | None = None) -> tuple[str, l
 
 
 def resolve_forms(family: str, forms: list[str], citation: dict, index: CanonicalIndex) -> Resolution | None:
-    """Resolve cada forma; só devolve se todas concordarem (mesma classe e mesmo registro)."""
+    """Consulta a base com cada forma canônica e só responde se todas concordarem.
+
+    Parameters
+    ----------
+    family : str
+        Família da citação.
+    forms : list of str
+        Formas canônicas de :func:`canonical`.
+    citation : dict
+        Citação original (dela vêm ``contexto`` e ``contexto_depois``).
+    index : CanonicalIndex
+        Índice da base.
+
+    Returns
+    -------
+    Resolution or None
+        O resultado comum; ``None`` se as formas levarem a classes ou registros diferentes.
+    """
     results = [resolve({"familia": family, "trecho": text, "contexto": citation.get("contexto", ""),
                         "contexto_depois": citation.get("contexto_depois", "")}, index) for text in forms]
     if len({(r.classificacao, r.id_canonico) for r in results}) == 1:
@@ -591,12 +914,36 @@ def resolve_forms(family: str, forms: list[str], citation: dict, index: Canonica
 # ------------------------------------------------------------------ camada
 
 class NLPLayer:
-    """Revisão das regras pelo modelo, dentro de um orçamento de tempo.
+    """Revisão das regras pelos modelos, dentro de um orçamento de tempo.
 
-    O envelope oficial é média <= 60 s/documento e 4 h no total. Se a média por documento (sem o
-    primeiro, que inclui carregar os modelos na GPU) passar de `budget_doc_s` depois de `warmup_docs`
-    documentos, ou o total passar de `budget_total_s`, a camada se desliga e o restante sai só com as
-    regras (ex.: contêiner sem GPU, modelo em CPU).
+    Parameters
+    ----------
+    client : OllamaClient
+        Modelo principal.
+    normalize : bool, default True
+        Renormaliza citações que as regras deixaram ``inventada`` ou ``incompleta``.
+    recall : bool, default True
+        Acrescenta citações que só os modelos viram.
+    chunk_chars : int, default 3000
+        Tamanho máximo de cada trecho enviado ao modelo.
+    workers : int, default 1
+        Pedidos em paralelo por documento.
+    budget_doc_s : float, default 40.0
+        Média máxima de segundos por documento.
+    budget_total_s : float, default 10800.0
+        Tempo total máximo da camada, em segundos (3 h).
+    warmup_docs : int, default 3
+        Documentos antes de conferir a média.
+    extra_clients : tuple of OllamaClient, optional
+        Modelos do conjunto: união para citações novas; normalização só se as leituras não levarem
+        a registros diferentes.
+
+    Notes
+    -----
+    O envelope oficial foi de média <= 60 s por documento e 4 h no total. Se a média por documento
+    (sem o primeiro, que inclui carregar os modelos na GPU) passar de ``budget_doc_s`` depois de
+    ``warmup_docs`` documentos, ou o total passar de ``budget_total_s``, a camada se desliga e o
+    restante sai só com as regras (ex.: contêiner sem GPU, modelo em CPU).
     """
 
     def __init__(self, client: OllamaClient, *, normalize: bool = True, recall: bool = True,
@@ -612,6 +959,13 @@ class NLPLayer:
         self.spent_s, self.docs, self.disabled, self.first_s = 0.0, 0, False, 0.0
 
     def _charge(self, seconds: float) -> None:
+        """Contabiliza o tempo de um documento e desliga a camada se o orçamento estourar.
+
+        Parameters
+        ----------
+        seconds : float
+            Tempo gasto pela camada no documento.
+        """
         self.spent_s += seconds
         self.docs += 1
         if self.docs == 1:
@@ -627,7 +981,18 @@ class NLPLayer:
     # -- chamadas ao modelo
 
     def chunks(self, content: str) -> list[tuple[int, str]]:
-        """Trechos de até ~chunk_chars caracteres, cortados em fim de parágrafo."""
+        """Corta o documento em trechos de até ``chunk_chars`` caracteres, em fim de parágrafo.
+
+        Parameters
+        ----------
+        content : str
+            Texto do documento.
+
+        Returns
+        -------
+        list of tuple of (int, str)
+            Offset de início e texto de cada trecho.
+        """
         out, start = [], 0
         while start < len(content):
             end = min(len(content), start + self.chunk_chars)
@@ -640,12 +1005,37 @@ class NLPLayer:
         return out
 
     def read(self, content: str, client: OllamaClient | None = None) -> list[tuple[int, dict]]:
-        """(offset do trecho, citação do modelo) para toda a peça."""
+        """Pede a um modelo as citações de todos os trechos do documento.
+
+        Parameters
+        ----------
+        content : str
+            Texto do documento.
+        client : OllamaClient, optional
+            Modelo a usar; padrão: o principal.
+
+        Returns
+        -------
+        list of tuple of (int, dict)
+            Offset do trecho e citação lida, para cada citação válida (com ``trecho`` em texto).
+        """
         items = []
         chunks = self.chunks(content)
         client = client or self.client
 
         def call(chunk: tuple[int, str]):
+            """Pede as citações de um trecho.
+
+            Parameters
+            ----------
+            chunk : tuple of (int, str)
+                Offset e texto do trecho.
+
+            Returns
+            -------
+            tuple of (int, list)
+                O offset e as citações da resposta (vazia se o modelo falhar).
+            """
             data = client.chat_json(SYSTEM, PROMPT.format(texto=chunk[1]), SCHEMA)
             return chunk[0], (data or {}).get("citacoes") or []
 
@@ -661,7 +1051,23 @@ class NLPLayer:
     # -- revisão
 
     def refine(self, content: str, citations: list[dict], index: CanonicalIndex) -> list[dict]:
-        """Revisa as citações das regras (dicts com inicio, fim, trecho, familia, resolution) e acrescenta novas."""
+        """Revisa as citações das regras e acrescenta as que só os modelos viram.
+
+        Parameters
+        ----------
+        content : str
+            Texto do documento.
+        citations : list of dict
+            Citações das regras (``inicio``, ``fim``, ``trecho``, ``familia``, ``resolution``).
+        index : CanonicalIndex
+            Índice da base.
+
+        Returns
+        -------
+        list of dict
+            As citações revisadas e as novas, em ordem de posição. Sem mudança se a camada estiver
+            desligada pelo orçamento.
+        """
         if self.disabled:
             return citations
         clock = time.monotonic()
@@ -679,6 +1085,25 @@ class NLPLayer:
 
     def _absorb(self, items: list[tuple[int, dict]], citations: list[dict], added: list[dict], state: "_DocState",
                 index: CanonicalIndex) -> None:
+        """Incorpora as leituras dos modelos às citações do documento.
+
+        Cada citação lida é localizada no texto; se coincidir com uma das regras (sobreposição de ao
+        menos 50% da menor), renormaliza-a; senão, depois de aparar o span e passar pelos filtros de
+        precisão, entra como citação nova.
+
+        Parameters
+        ----------
+        items : list of tuple of (int, dict)
+            Leituras de :meth:`read` (de todos os modelos).
+        citations : list of dict
+            Citações das regras (alteradas no lugar).
+        added : list of dict
+            Citações novas (acrescentadas no lugar).
+        state : _DocState
+            O que a revisão do documento reaproveita.
+        index : CanonicalIndex
+            Índice da base.
+        """
         content = state.content
         for _, item in items:
             # Todas as ocorrências no documento: a mesma citação repetida é anotada em cada lugar.
@@ -714,8 +1139,23 @@ class NLPLayer:
                     added.append(new)
 
     def _shrink_overlong(self, citation: dict, start: int, end: int, content: str, index: CanonicalIndex) -> None:
-        """Span das regras muito maior que a citação que o modelo alinhou dentro dele (um parágrafo inteiro
-        sob ruído extremo): passa a ser o do modelo e é resolvido de novo pelas regras."""
+        """Troca um span das regras longo demais pelo span do modelo contido nele.
+
+        Sob ruído extremo, as regras às vezes capturam um parágrafo inteiro. Se o span tiver mais de
+        150 caracteres e mais de 3 vezes o do modelo, passa a ser o do modelo e é resolvido de novo
+        pelas regras (não pela leitura do modelo).
+
+        Parameters
+        ----------
+        citation : dict
+            Citação das regras (alterada no lugar).
+        start, end : int
+            Span do modelo no texto.
+        content : str
+            Texto do documento.
+        index : CanonicalIndex
+            Índice da base.
+        """
         length = citation["fim"] - citation["inicio"]
         if not (length > 150 and length > 3 * (end - start) and citation["inicio"] <= start and end <= citation["fim"]):
             return
@@ -727,6 +1167,24 @@ class NLPLayer:
         citation["resolution"] = resolution
 
     def _renormalize(self, citation: dict, item: dict, index: CanonicalIndex, evidence: str | None = None) -> None:
+        """Propõe uma nova classe para uma citação das regras a partir da leitura do modelo.
+
+        Só para citações que as regras não resolveram como ``real`` e da mesma família que o modelo
+        leu. A forma canônica (:func:`canonical`) é consultada na base; se der ``real``, vira proposta
+        ``real_nlp``; se der ``inventada`` e as regras não tinham achado o número, ``inventada_nlp``.
+        Propostas diferentes de modelos diferentes marcam conflito, e aí fica a resposta das regras.
+
+        Parameters
+        ----------
+        citation : dict
+            Citação das regras (alterada no lugar).
+        item : dict
+            Citação lida pelo modelo.
+        index : CanonicalIndex
+            Índice da base.
+        evidence : str, optional
+            Trecho com entorno curto, para evidência de tribunal, classe e diploma.
+        """
         resolution: Resolution = citation.get("_original") or citation["resolution"]
         if resolution.classificacao == REAL:
             return  # o que as regras resolveram não muda
@@ -757,7 +1215,30 @@ class NLPLayer:
 
     def _acceptable(self, content: str, start: int, end: int, item: dict, header_end: int,
                     own_numbers: set[str]) -> bool:
-        """Filtros de precisão para citação que só o modelo viu."""
+        """Aplica os filtros de precisão a uma citação que só o modelo viu.
+
+        Recusa distratores (linhas de autos, protocolo, OAB, fls., valor), números no cabeçalho, o
+        número dos autos do próprio documento, números que não vêm depois de palavras de citação e
+        leituras que não passam pelas guardas de :func:`canonical`.
+
+        Parameters
+        ----------
+        content : str
+            Texto do documento.
+        start, end : int
+            Span da citação.
+        item : dict
+            Citação lida pelo modelo.
+        header_end : int
+            Fim do cabeçalho do documento.
+        own_numbers : set of str
+            Números longos do cabeçalho (os autos do próprio documento).
+
+        Returns
+        -------
+        bool
+            ``True`` se a citação pode entrar.
+        """
         line_start = content.rfind("\n", 0, start) + 1
         if DISTRACTOR_LINE.match(content[line_start:start]) or DISTRACTOR_LINE.match(content[line_start:end]):
             return False
@@ -776,6 +1257,24 @@ class NLPLayer:
         return item.get("tipo") == "julgado" and _plausible_julgado(item, span)
 
     def _classify_new(self, content: str, start: int, end: int, item: dict, index: CanonicalIndex) -> dict | None:
+        """Classifica uma citação nova pelas regras e, se não for ``real``, tenta a renormalização.
+
+        Parameters
+        ----------
+        content : str
+            Texto do documento.
+        start, end : int
+            Span da citação.
+        item : dict
+            Citação lida pelo modelo.
+        index : CanonicalIndex
+            Índice da base.
+
+        Returns
+        -------
+        dict or None
+            A citação, com confiança limitada à de citação nova.
+        """
         span = content[start:end]
         family = FAMILY[item["tipo"]]
         citation = {"inicio": start, "fim": end, "trecho": span, "familia": family,
@@ -804,10 +1303,24 @@ _UF_TAIL = re.compile(r"\s*(?:[/\-–(]\s*)?([A-Z]{2})\)?(?![A-Za-z])")
 
 
 def _trim_process(content: str, start: int, end: int, digits: str) -> tuple[int, int]:
-    """Núcleo de uma citação de processo dentro de um trecho longo demais (frase inteira sob ruído).
+    """Recorta o núcleo de uma citação de processo dentro de um trecho longo demais.
 
-    Fim: fim do número (+ UF). Começo: primeira palavra que abre citação (classe, recurso) nos 60
-    caracteres antes do número; sem ela, o próprio número. Trecho já compacto não muda.
+    Fim: fim do número (mais a UF). Começo: primeira palavra que abre citação (classe, recurso)
+    nos 60 caracteres antes do número; sem ela, o próprio número. Trecho já compacto não muda.
+
+    Parameters
+    ----------
+    content : str
+        Texto (já limpo, ver :func:`_on_clean`).
+    start, end : int
+        Span do trecho.
+    digits : str
+        Número lido pelo modelo; se não estiver no trecho, vale o único candidato.
+
+    Returns
+    -------
+    tuple of (int, int)
+        O span recortado.
     """
     span = content[start:end]
     groups = number_group_spans(span)
@@ -838,8 +1351,25 @@ _THOUSANDS = re.compile(r"[ .\u00a0]+[\dOolI|SsgqGbBZz]{3}(?![\w])")
 
 
 def _trim_article(content: str, start: int, end: int, digits: str) -> tuple[int, int]:
-    """Núcleo de uma citação de artigo dentro de um trecho longo demais: da pista ("art.", "artigo") com o
-    número lido pelo modelo até o fim do nome do diploma, com as mesmas peças que as regras usam."""
+    """Recorta o núcleo de uma citação de artigo dentro de um trecho longo demais.
+
+    Vai da pista ("art.", "artigo") com o número lido pelo modelo até o fim do nome do diploma, com
+    as mesmas peças que as regras usam.
+
+    Parameters
+    ----------
+    content : str
+        Texto (já limpo).
+    start, end : int
+        Span do trecho.
+    digits : str
+        Número do artigo lido pelo modelo.
+
+    Returns
+    -------
+    tuple of (int, int)
+        O span recortado; o original se não houver recorte seguro.
+    """
     span = content[start:end]
     if len(span) <= 120:
         return start, end
@@ -864,8 +1394,25 @@ _SUMULA_TAIL = re.compile(r"[\s,]*(?:(?:d|cl)[oa]\s*)?(?:[S5]T[FJM]|T[S5][TE])(?
 
 
 def _trim_sumula(content: str, start: int, end: int, digits: str) -> tuple[int, int]:
-    """Núcleo de uma súmula dentro de um trecho longo demais: da pista ("Súmula", "Súm.", "verbete") até o
-    número lido pelo modelo e, se vier logo depois, o tribunal ("… 331 do TST")."""
+    """Recorta o núcleo de uma súmula dentro de um trecho longo demais.
+
+    Vai da pista ("Súmula", "Súm.", "verbete") até o número lido pelo modelo e, se vier logo
+    depois, o tribunal ("… 331 do TST").
+
+    Parameters
+    ----------
+    content : str
+        Texto (já limpo).
+    start, end : int
+        Span do trecho.
+    digits : str
+        Número da súmula lido pelo modelo.
+
+    Returns
+    -------
+    tuple of (int, int)
+        O span recortado; o original se não houver recorte seguro.
+    """
     span = content[start:end]
     if len(span) <= 40 or not digits:
         return start, end
@@ -881,8 +1428,26 @@ def _trim_sumula(content: str, start: int, end: int, digits: str) -> tuple[int, 
 
 
 def _on_clean(core, content: str, start: int, end: int, digits: str) -> tuple[int, int]:
-    """Aplica um aparador ao trecho já limpo pelas regras (acento decomposto, mojibake, invisíveis, margem)
-    e devolve offsets no texto original."""
+    """Aplica um recortador ao trecho limpo pelas regras e devolve offsets do texto original.
+
+    A limpeza trata acento decomposto, mojibake, caracteres invisíveis e numeração de margem.
+
+    Parameters
+    ----------
+    core : callable
+        Recortador (:func:`_trim_process`, :func:`_trim_article` ou :func:`_trim_sumula`).
+    content : str
+        Texto do documento.
+    start, end : int
+        Span do trecho no texto original.
+    digits : str
+        Número lido pelo modelo.
+
+    Returns
+    -------
+    tuple of (int, int)
+        O span recortado, no texto original.
+    """
     composed, nfc_map = _nfc(content[start:end])
     cleaned, mapping = clean(composed)
     a, b = core(cleaned, 0, len(cleaned), digits)
@@ -893,7 +1458,20 @@ def _on_clean(core, content: str, start: int, end: int, digits: str) -> tuple[in
 
 
 def _nfc(text: str) -> tuple[str, list[int]]:
-    """Recompõe acentos decompostos ("Su\u0301mula" -> "Súmula") com o índice original de cada caractere."""
+    r"""Recompõe acentos decompostos ("Su\u0301mula" -> "Súmula").
+
+    Parameters
+    ----------
+    text : str
+        Texto de entrada.
+
+    Returns
+    -------
+    composed : str
+        O texto em NFC.
+    index : list of int
+        Para cada caractere recomposto, o índice no texto original.
+    """
     out, index, i = [], [], 0
     while i < len(text):
         j = i + 1
@@ -907,21 +1485,82 @@ def _nfc(text: str) -> tuple[str, list[int]]:
 
 
 def trim_process(content: str, start: int, end: int, digits: str) -> tuple[int, int]:
+    """Recorta o núcleo de uma citação de processo (ver :func:`_trim_process`).
+
+    Parameters
+    ----------
+    content : str
+        Texto do documento.
+    start, end : int
+        Span do trecho.
+    digits : str
+        Número lido pelo modelo.
+
+    Returns
+    -------
+    tuple of (int, int)
+        O span recortado, no texto original.
+    """
     return _on_clean(_trim_process, content, start, end, digits)
 
 
 def trim_article(content: str, start: int, end: int, digits: str) -> tuple[int, int]:
+    """Recorta o núcleo de uma citação de artigo (ver :func:`_trim_article`).
+
+    Parameters
+    ----------
+    content : str
+        Texto do documento.
+    start, end : int
+        Span do trecho.
+    digits : str
+        Número do artigo lido pelo modelo.
+
+    Returns
+    -------
+    tuple of (int, int)
+        O span recortado, no texto original.
+    """
     return _on_clean(_trim_article, content, start, end, digits)
 
 
 def trim_sumula(content: str, start: int, end: int, digits: str) -> tuple[int, int]:
+    """Recorta o núcleo de uma súmula (ver :func:`_trim_sumula`).
+
+    Parameters
+    ----------
+    content : str
+        Texto do documento.
+    start, end : int
+        Span do trecho.
+    digits : str
+        Número da súmula lido pelo modelo.
+
+    Returns
+    -------
+    tuple of (int, int)
+        O span recortado, no texto original.
+    """
     return _on_clean(_trim_sumula, content, start, end, digits)
 
 
 def _plausible_julgado(item: dict, span: str) -> bool:
-    """Julgado que a guarda estrita não confirmou (OCR pesado no nome): exige ano, tribunal e um nome no trecho.
+    """Aceita um julgado descrito que a guarda estrita não confirmou (OCR pesado no nome).
 
-    A classe continua vindo das regras (resolução do trecho); isto só decide se o trecho entra.
+    Exige ano, tribunal (ou classe) e um nome parecido com o lido pelo modelo no trecho. A classe
+    continua vindo das regras; isto só decide se o trecho entra.
+
+    Parameters
+    ----------
+    item : dict
+        Citação lida pelo modelo.
+    span : str
+        Trecho da citação.
+
+    Returns
+    -------
+    bool
+        ``True`` se o trecho é plausível.
     """
     if not any(len(g) == 4 and g[:2] in ("19", "20") for g in number_groups(span)):
         return False
@@ -936,12 +1575,43 @@ _OWN_AUTOS = re.compile(r"(?<![^\W\d_])[aá][uvn]t[o0][s5](?![^\W\d_])", re.IGNO
 
 
 def _same_citation(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """Diz se dois spans são a mesma citação: sobreposição de ao menos 50% do menor.
+
+    Parameters
+    ----------
+    a, b : tuple of (int, int)
+        Spans (início, fim).
+
+    Returns
+    -------
+    bool
+        ``True`` se os spans se sobrepõem o bastante.
+    """
     shared = min(a[1], b[1]) - max(a[0], b[0])
     return shared > 0 and shared >= 0.5 * min(a[1] - a[0], b[1] - b[0])
 
 
 class _DocState:
-    """O que a revisão de um documento reaproveita entre as leituras dos modelos."""
+    """O que a revisão de um documento reaproveita entre as leituras dos modelos.
+
+    Parameters
+    ----------
+    content : str
+        Texto do documento.
+
+    Attributes
+    ----------
+    content : str
+        Texto do documento.
+    text_sk : str
+        Esqueleto do texto (:func:`skeleton`).
+    text_index : list of int
+        Índices do esqueleto no texto original.
+    header_end : int
+        Fim do cabeçalho (:func:`_header_end`).
+    own_numbers : set of str
+        Números longos do cabeçalho (os autos do próprio documento).
+    """
 
     def __init__(self, content: str):
         self.content = content
@@ -951,7 +1621,20 @@ class _DocState:
 
 
 def _header_end(content: str) -> int:
-    """Fim do cabeçalho: início da primeira linha de prosa (o cabeçalho só tem linhas curtas)."""
+    """Localiza o fim do cabeçalho: o início da primeira linha de prosa.
+
+    O cabeçalho só tem linhas curtas; procura até 1.500 caracteres.
+
+    Parameters
+    ----------
+    content : str
+        Texto do documento.
+
+    Returns
+    -------
+    int
+        Posição do fim do cabeçalho; 0 se não achar.
+    """
     pos = 0
     for line in content.splitlines(keepends=True):
         if len(line.strip()) >= 70:
@@ -965,7 +1648,37 @@ def _header_end(content: str) -> int:
 def from_args(enabled: bool, url: str, model: str, cache: Path | None, *, normalize: bool = True,
               recall: bool = True, workers: int = 1, budget_doc_s: float = 40.0,
               budget_total_s: float = 3 * 3600.0, extra_models: tuple[str, ...] = ()) -> NLPLayer | None:
-    """Camada pronta para uso, ou None (com aviso) se desligada ou sem servidor/modelo."""
+    """Monta a camada pronta para uso, com os modelos disponíveis.
+
+    Parameters
+    ----------
+    enabled : bool
+        Se a camada deve ser ligada.
+    url : str
+        Servidor Ollama (local).
+    model : str
+        Modelo principal.
+    cache : pathlib.Path or None
+        Pasta de cache das respostas.
+    normalize : bool, default True
+        Renormaliza citações das regras.
+    recall : bool, default True
+        Acrescenta citações novas.
+    workers : int, default 1
+        Pedidos em paralelo por documento.
+    budget_doc_s : float, default 40.0
+        Média máxima de segundos por documento.
+    budget_total_s : float, default 10800.0
+        Tempo total máximo, em segundos.
+    extra_models : tuple of str, optional
+        Modelos do conjunto; os indisponíveis ficam de fora, com aviso.
+
+    Returns
+    -------
+    NLPLayer or None
+        A camada; ``None`` (com aviso) se desligada, se o servidor não for local ou se não houver
+        servidor ou modelo principal.
+    """
     if not enabled:
         return None
     try:

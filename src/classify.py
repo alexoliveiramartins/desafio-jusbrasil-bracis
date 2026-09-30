@@ -1,9 +1,9 @@
-"""Classificação das citações contra a base canônica (desafio1_bracis.db).
+"""Classificação das citações contra a base canônica.
 
-  1. índice: lê a base uma vez e indexa o número PRÓPRIO de cada acórdão,
-     súmulas e dispositivos (`CanonicalIndex`);
-  2. resolvedor: citação -> real (com id_canonico) / inventada / incompleta
-     (`resolve`). É o único ponto que pode dizer `real`, e só por consulta à base.
+1. Índice (:class:`CanonicalIndex`): lê a base uma vez e indexa o número PRÓPRIO de cada
+   acórdão, as súmulas e os dispositivos de lei.
+2. Resolvedor (:func:`resolve`): citação -> ``real`` (com ``id_canonico``), ``inventada`` ou
+   ``incompleta``. É o único ponto que pode dizer ``real``, e só por consulta à base.
 """
 
 from __future__ import annotations
@@ -77,6 +77,28 @@ SUMULA_HEADER = re.compile(r"^\s*Súmula\s+(Vinculante\s+)?n\.?\s*(\d+)\s+d[oa]\
 
 @dataclass(frozen=True)
 class Record:
+    """Registro da base canônica, com os identificadores extraídos do texto.
+
+    Attributes
+    ----------
+    doc_id : str
+        Identificador do Jusbrasil (coluna ``id``), o que vai em ``id_canonico``.
+    tribunal : str or None
+        STF, STJ, TSE, TST ou STM; ``None`` para dispositivos de lei.
+    natureza : str
+        ``acordao``, ``sumula`` ou ``dispositivo``.
+    ano : int or None
+        Ano do julgamento (só acórdãos).
+    relator : str or None
+        Nome do relator (só acórdãos).
+    uf : str or None
+        UF lida no cabeçalho, quando houver.
+    chain : tuple of str
+        Cadeia recursal do cabeçalho, ex.: ``("AGINT", "ED")`` para "EDcl no AgInt no REsp".
+    classe : str or None
+        Classe processual principal do cabeçalho ("REsp", "AREsp", "Rcl"...).
+    """
+
     doc_id: str
     tribunal: str | None
     natureza: str
@@ -91,6 +113,31 @@ class Record:
 
 @dataclass
 class CanonicalIndex:
+    """Índices em memória da base canônica, montados a partir do ``.db`` recebido.
+
+    A base não tem colunas com o número do processo, da súmula ou do artigo: esses
+    identificadores são extraídos do cabeçalho de cada registro uma única vez.
+
+    Attributes
+    ----------
+    records : dict of str to Record
+        Todos os registros, por ``doc_id``.
+    by_cnj : dict of tuple to list of str
+        Acórdãos por número CNJ normalizado (``normalize.cnj_key``).
+    by_short : dict of int to list of str
+        Acórdãos por número curto (``normalize.short_key``).
+    sumulas : dict of tuple to str
+        Súmulas por ``(tribunal, número, vinculante)``.
+    dispositivos : dict of tuple to str
+        Dispositivos por ``(diploma, artigo)``.
+    unindexed : list of str
+        Registros cujo identificador não foi encontrado no texto.
+    terms : dict of str to frozenset
+        Termos do início de cada acórdão (ementa), para desempate por contexto.
+    relator_tokens : list of frozenset
+        Tokens do nome de cada relator do acervo; acham descritivas sem pista de relatoria.
+    """
+
     records: dict[str, Record] = field(default_factory=dict)
     by_cnj: dict[tuple, list[str]] = field(default_factory=lambda: defaultdict(list))
     by_short: dict[int, list[str]] = field(default_factory=lambda: defaultdict(list))
@@ -104,6 +151,23 @@ class CanonicalIndex:
 
     @classmethod
     def from_sqlite(cls, path: str | Path) -> "CanonicalIndex":
+        """Monta o índice a partir de uma base SQLite, aberta só para leitura.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Caminho do ``.db`` no formato do desafio (tabela ``documentos``).
+
+        Returns
+        -------
+        CanonicalIndex
+            O índice pronto.
+
+        Raises
+        ------
+        FileNotFoundError
+            Se a base não existir.
+        """
         path = Path(path)
         if not path.is_file():
             raise FileNotFoundError(f"base canônica não encontrada: {path}")
@@ -125,6 +189,26 @@ class CanonicalIndex:
         return index
 
     def _add(self, doc_id, tribunal, natureza, ano, relator, texto) -> None:
+        """Indexa um registro da base.
+
+        Dispositivos e súmulas são lidos pelo cabeçalho ("Artigo 290 do Decreto-Lei nº 1.001",
+        "Súmula Vinculante n. 10 do STF"); acórdãos, pelo número próprio (:func:`_own_number`).
+
+        Parameters
+        ----------
+        doc_id : str
+            Identificador do Jusbrasil.
+        tribunal : str or None
+            Tribunal do registro.
+        natureza : str
+            ``acordao``, ``sumula`` ou ``dispositivo``.
+        ano : int or None
+            Ano do julgamento.
+        relator : str or None
+            Nome do relator.
+        texto : str
+            Inteiro teor.
+        """
         if natureza == "dispositivo":
             header = ARTIGO_HEADER.match(texto)
             if header and diploma_key(header.group(2)):
@@ -158,16 +242,49 @@ class CanonicalIndex:
 
 
 def _unglue(text: str) -> str:
-    """Separa palavras grudadas na base: "nosEMBARGOS" -> "nos EMBARGOS".
+    """Separa palavras grudadas no texto da base: "nosEMBARGOS" -> "nos EMBARGOS".
 
-    Só na fronteira minúscula -> duas maiúsculas, para não quebrar siglas
-    como "AgInt", "REsp" e "AgRg".
+    Só na fronteira minúscula -> duas maiúsculas, para não quebrar siglas como "AgInt", "REsp" e
+    "AgRg".
+
+    Parameters
+    ----------
+    text : str
+        Texto do registro.
+
+    Returns
+    -------
+    str
+        O texto com as palavras separadas.
     """
     return re.sub(r"(?<=[a-zà-ÿ])(?=[A-ZÀ-Ý]{2})", " ", text)
 
 
 def _own_number(tribunal: str | None, texto: str):
-    """(chave do número próprio, UF, cadeia recursal) de um acórdão."""
+    """Extrai o número próprio de um acórdão (o processo que ele é, não os que cita).
+
+    STM e TSE usam numeração CNJ no cabeçalho; o TST se identifica como
+    ``TST-<recursos>-<CNJ>`` depois de "Vistos, relatados e discutidos"; STJ e STF, por
+    "Nº 1.528.455 - RJ", "RECLAMAÇÃO 76.532" ou equivalente no cabeçalho.
+
+    Parameters
+    ----------
+    tribunal : str or None
+        Tribunal do registro.
+    texto : str
+        Inteiro teor.
+
+    Returns
+    -------
+    key : tuple or int or None
+        Chave CNJ (tupla) ou número curto (int); ``None`` se não encontrado.
+    uf : str or None
+        UF lida junto ao número.
+    chain : tuple of str
+        Cadeia recursal antes do número.
+    classe : str or None
+        Classe processual antes do número.
+    """
     texto = _unglue(texto[:1500]) + texto[1500:]
     header = texto[:1500]
     # STM, TSE e TST usam numeração CNJ; no TST ela não está no cabeçalho,
@@ -223,8 +340,8 @@ def _own_number(tribunal: str | None, texto: str):
 REAL, INVENTADA, INCOMPLETA = "real", "inventada", "incompleta"
 
 # Probabilidade de a classe estar correta, por regra. Alimenta o bônus de
-# calibração (Brier). Medida nos conjuntos de iteração (`python -m tools.calibrate`),
-# com teto de 0,98: o sintético tende a ser mais fácil que o cego.
+# calibração (Brier). Medida durante o desenvolvimento em conjuntos sintéticos
+# rotulados pela base, com teto de 0,98: o sintético tende a ser mais fácil que o cego.
 # real_descritiva fica mais baixa: depende de uma leitura da regra oficial que
 # nem o dev nem o sintético confirmam.
 CONFIDENCE = {
@@ -261,6 +378,21 @@ CLASS_TRIBUNAL = {
 
 @dataclass
 class Resolution:
+    """Resultado da classificação de uma citação.
+
+    Attributes
+    ----------
+    classificacao : str
+        ``real``, ``inventada`` ou ``incompleta``.
+    id_canonico : str or None
+        ``doc_id`` do registro, só quando ``real``.
+    confianca : float
+        Probabilidade de a classe (e o link, se ``real``) estar correta; alimenta o bônus de
+        calibração da métrica.
+    regra : str
+        Regra que decidiu a classe (chave de :data:`CONFIDENCE`).
+    """
+
     classificacao: str
     id_canonico: str | None
     confianca: float
@@ -268,10 +400,52 @@ class Resolution:
 
 
 def _result(classe: str, doc_id: str | None, regra: str) -> Resolution:
+    """Monta um :class:`Resolution` com a confiança calibrada da regra.
+
+    Parameters
+    ----------
+    classe : str
+        ``real``, ``inventada`` ou ``incompleta``.
+    doc_id : str or None
+        Registro, quando ``real``.
+    regra : str
+        Chave de :data:`CONFIDENCE`.
+
+    Returns
+    -------
+    Resolution
+        O resultado.
+    """
     return Resolution(classe, doc_id, CONFIDENCE[regra], regra)
 
 
 def resolve(citation: dict, index: CanonicalIndex) -> Resolution:
+    """Classifica uma citação consultando a base.
+
+    Parameters
+    ----------
+    citation : dict
+        Citação com ``familia``, ``trecho`` (e ``trecho_norm``, se houver), ``contexto`` e
+        ``contexto_depois``.
+    index : CanonicalIndex
+        Índice da base.
+
+    Returns
+    -------
+    Resolution
+        Classe, ``id_canonico``, confiança e regra.
+
+    Raises
+    ------
+    ValueError
+        Se a família da citação for desconhecida.
+
+    Notes
+    -----
+    Por família: processos pelo número (:func:`_resolve_process`); súmulas por número, tribunal e
+    vinculante; artigos por diploma e número; julgados descritos por tribunal, ano e relator.
+    Temas saem ``inventada``: a base não cobre temas.
+    """
     familia = citation["familia"]
     trecho = citation.get("trecho_norm") or citation["trecho"]
     if familia in ("processos", "processos_trabalhistas"):
@@ -298,6 +472,29 @@ RELATOR_AFTER = re.compile(
 
 
 def _resolve_process(trecho: str, index: CanonicalIndex, context: str, after: str) -> Resolution:
+    """Resolve uma citação de processo pelo número.
+
+    Sem número legível, ``incompleta``; com número e sem registro, ``inventada``; com registro,
+    ``real``. Entre vários candidatos, ordena por cadeia recursal, relator citado logo depois do
+    número e termos do contexto em comum com a ementa.
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação (limpo).
+    index : CanonicalIndex
+        Índice da base.
+    context : str
+        Texto em volta da citação (400 caracteres de cada lado).
+    after : str
+        Texto logo depois da citação, onde pode estar "Rel. Min. Fulano".
+
+    Returns
+    -------
+    Resolution
+        O resultado; a regra registra se houve correção de OCR, duplicata no acervo, cadeia ou
+        relator divergentes.
+    """
     digits, fixes = number_digits(trecho)
     if not digits:
         return _result(INCOMPLETA, None, "incompleta_sem_numero")
@@ -319,6 +516,18 @@ def _resolve_process(trecho: str, index: CanonicalIndex, context: str, after: st
     context_terms = content_terms(context) if context else frozenset()
 
     def rank(doc_id: str):
+        """Chave de ordenação de um candidato.
+
+        Parameters
+        ----------
+        doc_id : str
+            Candidato.
+
+        Returns
+        -------
+        tuple
+            (distância da cadeia recursal, relator divergente, -termos em comum, doc_id).
+        """
         record = index.records[doc_id]
         return (
             chain_distance(chain, record.chain),                                   # 1. cadeia recursal
@@ -347,7 +556,22 @@ def _resolve_process(trecho: str, index: CanonicalIndex, context: str, after: st
 
 
 def _process_candidates(digits: str, trecho: str, index: CanonicalIndex) -> list[str]:
-    """Registros com esse número, filtrados por classe, UF e tribunal citados no trecho."""
+    """Busca os registros com o número citado, filtrados pelo que o trecho informa.
+
+    Parameters
+    ----------
+    digits : str
+        Dígitos do número (14 ou mais: CNJ; menos: número curto).
+    trecho : str
+        Texto da citação; dele vêm classe, UF e tribunal para filtrar.
+    index : CanonicalIndex
+        Índice da base.
+
+    Returns
+    -------
+    list of str
+        ``doc_id`` dos candidatos compatíveis.
+    """
     key = cnj_key(digits) if len(digits) >= 14 else None
     if key:
         candidates = [c for c in index.by_cnj.get(key, ()) if index.records[c].tribunal in (cnj_justice(key), None)]
@@ -364,8 +588,21 @@ def _process_candidates(digits: str, trecho: str, index: CanonicalIndex) -> list
 
 
 def _robust_number(trecho: str, digits: str) -> str | None:
-    """Número do trecho pelo leitor de OCR colado (normalize.number_groups), se for o único candidato
-    e diferente do que a leitura principal achou: CNJ (14 a 20 dígitos) ou número curto (3 a 8)."""
+    """Relê o número do trecho com o leitor de OCR colado (``normalize.number_groups``).
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+    digits : str
+        Número que a leitura principal achou.
+
+    Returns
+    -------
+    str or None
+        O número relido, se for o único candidato do trecho (CNJ de 14 a 20 dígitos ou número
+        curto de 3 a 8) e diferente do da leitura principal; senão ``None``.
+    """
     groups = [g for g in number_groups(trecho) if not (len(g) == 4 and g[:2] in ("19", "20"))]
     cnj = [g.zfill(20) for g in groups if 14 <= len(g) <= 20]
     short = [g for g in groups if 3 <= len(g) <= 8]
@@ -376,10 +613,38 @@ def _robust_number(trecho: str, digits: str) -> str | None:
 
 
 def _before_number(trecho: str) -> str:
+    """Devolve o trecho antes do número (onde ficam classe e recursos).
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+
+    Returns
+    -------
+    str
+        O prefixo antes do número.
+    """
     return trecho[:locate_number(trecho)[2]]
 
 
 def _filter_by_class(trecho: str, candidates: list[str], index: CanonicalIndex) -> list[str]:
+    """Mantém só os candidatos de tribunais em que a classe citada existe.
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+    candidates : list of str
+        Candidatos pelo número.
+    index : CanonicalIndex
+        Índice da base.
+
+    Returns
+    -------
+    list of str
+        Candidatos compatíveis com a classe; todos, se a classe for desconhecida.
+    """
     courts = CLASS_COURTS.get(class_code(_before_number(trecho)) or "")
     if not courts:
         return candidates
@@ -402,7 +667,21 @@ _SUMULA_OCR_NUMBER = re.compile(
 
 
 def _resolve_sumula(trecho: str, index: CanonicalIndex) -> Resolution:
-    """Número + tribunal (sigla ou extenso) + vinculante, em qualquer ordem."""
+    """Resolve uma súmula por número, tribunal (sigla ou extenso) e vinculante, em qualquer ordem.
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+    index : CanonicalIndex
+        Índice da base.
+
+    Returns
+    -------
+    Resolution
+        ``incompleta`` sem número legível ou quando o número existe em mais de um tribunal sem
+        tribunal citado; ``inventada`` sem registro; ``real`` com registro.
+    """
     cue = _SUMULA_CUE.search(trecho)
     digits, fixes = number_digits(trecho[cue.start():] if cue else trecho)
     if not digits and cue and (m := _SUMULA_OCR_NUMBER.search(trecho, cue.end())):
@@ -427,6 +706,21 @@ def _resolve_sumula(trecho: str, index: CanonicalIndex) -> Resolution:
 
 
 def _resolve_article(trecho: str, index: CanonicalIndex) -> Resolution:
+    """Resolve um artigo de lei por diploma e número.
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+    index : CanonicalIndex
+        Índice da base.
+
+    Returns
+    -------
+    Resolution
+        ``incompleta`` sem número ou sem diploma identificável; ``inventada`` sem registro;
+        ``real`` com registro.
+    """
     numero = article_number(trecho)
     diploma = article_diploma(trecho)
     if numero is None or diploma is None:
@@ -447,10 +741,22 @@ _RELATOR_FALLBACK = re.compile(
 
 
 def descriptive_matches(trecho: str, index: CanonicalIndex) -> list[str] | None:
-    """Registros compatíveis com tribunal + ano + relator (+ classe, se citada).
+    """Busca os acórdãos compatíveis com uma citação descritiva (tribunal, ano e relator).
 
-    Aceita os três elementos em qualquer ordem e o tribunal por sigla ou por
-    extenso. Devolve None quando falta algum elemento da consulta.
+    Aceita os três elementos em qualquer ordem e o tribunal por sigla ou por extenso; a classe,
+    se citada, também filtra.
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação, ex.: "precedente do STF de 2024, da relatoria de Fulano".
+    index : CanonicalIndex
+        Índice da base.
+
+    Returns
+    -------
+    list of str or None
+        ``doc_id`` dos acórdãos compatíveis; ``None`` quando falta algum elemento da consulta.
     """
     text = " ".join(trecho.split())
     rel = relator_name(text) or known_relator(text, index.relator_tokens)
@@ -487,7 +793,25 @@ def descriptive_matches(trecho: str, index: CanonicalIndex) -> list[str] | None:
 
 
 def _resolve_descriptive(trecho: str, index: CanonicalIndex) -> Resolution:
-    """Tribunal + ano + relator: só é `real` se identificar um único registro."""
+    """Resolve uma citação descritiva: só é ``real`` se identificar um único registro.
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+    index : CanonicalIndex
+        Índice da base.
+
+    Returns
+    -------
+    Resolution
+        ``real`` com um registro; ``incompleta`` com vários, nenhum ou elementos faltando.
+
+    Notes
+    -----
+    Nenhum registro sugeriria ``inventada``, mas nos conjuntos sintéticos isso vinha de OCR no
+    nome do relator, e o gabarito não tem descritiva inventada; ``incompleta`` também não arrisca τ.
+    """
     matches = descriptive_matches(trecho, index)
     if matches is None:
         return _result(INCOMPLETA, None, "incompleta_sem_numero")

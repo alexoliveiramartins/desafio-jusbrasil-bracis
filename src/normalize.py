@@ -1,7 +1,7 @@
-"""Normalização de citações: OCR, números de processo e diplomas legais.
+"""Normalização de citações: OCR, números de processo, classes, recursos e diplomas legais.
 
-Nada aqui altera o texto do documento. As funções recebem o trecho já
-extraído e devolvem chaves comparáveis com o índice da base canônica.
+Nada aqui altera o texto do documento. As funções recebem o trecho já extraído e devolvem
+chaves comparáveis com o índice da base canônica (``classify.CanonicalIndex``).
 """
 
 from __future__ import annotations
@@ -27,12 +27,35 @@ SEPARATOR = re.compile(r"[\s.\-–—]*")
 
 
 def strip_accents(text: str) -> str:
+    """Remove os acentos (decomposição NFKD sem as marcas combinantes).
+
+    Parameters
+    ----------
+    text : str
+        Texto de entrada.
+
+    Returns
+    -------
+    str
+        O texto sem acentos.
+    """
     decomposed = unicodedata.normalize("NFKD", text)
     return "".join(c for c in decomposed if not unicodedata.combining(c))
 
 
 def fold(text: str) -> str:
-    """Minúsculas, sem acentos e com espaços simples."""
+    """Normaliza para comparação: minúsculas, sem acentos e com espaços simples.
+
+    Parameters
+    ----------
+    text : str
+        Texto de entrada.
+
+    Returns
+    -------
+    str
+        O texto normalizado.
+    """
     return re.sub(r"\s+", " ", strip_accents(text).lower()).strip()
 
 
@@ -57,8 +80,34 @@ _FIRST_OCR = {"c": "e", "e": "c", "l": "i", "i": "l"}
 
 
 def ocr_fix_words(text: str) -> str:
-    """fold() + correção de palavras do vocabulário jurídico com erro de OCR."""
+    """Aplica :func:`fold` e corrige palavras do vocabulário jurídico com erro de OCR.
+
+    Ex.: "agrãv0" -> "agravo", "crirninal" -> "criminal". Só corrige para palavras de
+    ``LEGAL_VOCABULARY`` suficientemente parecidas.
+
+    Parameters
+    ----------
+    text : str
+        Texto de entrada.
+
+    Returns
+    -------
+    str
+        O texto normalizado, com as palavras corrigidas.
+    """
     def fix(m: re.Match) -> str:
+        """Corrige uma palavra, se houver uma do vocabulário próxima o bastante.
+
+        Parameters
+        ----------
+        m : re.Match
+            Palavra encontrada.
+
+        Returns
+        -------
+        str
+            A palavra do vocabulário ou a original.
+        """
         word = m.group()
         if len(word) < 5 or word in LEGAL_VOCABULARY:
             return word
@@ -77,16 +126,40 @@ def ocr_fix_words(text: str) -> str:
 
 
 def is_subsequence(short: str, word: str) -> bool:
+    """Diz se ``short`` é subsequência de ``word`` (as letras aparecem na mesma ordem).
+
+    Parameters
+    ----------
+    short : str
+        Candidata a abreviação.
+    word : str
+        Palavra completa.
+
+    Returns
+    -------
+    bool
+        ``True`` se todas as letras de ``short`` aparecem em ``word``, na ordem.
+    """
     it = iter(word)
     return all(ch in it for ch in short)
 
 
 def expand_abbreviation(token: str) -> str | None:
-    """'espec' -> 'especial', 'embs' -> 'embargos', 'rg' -> 'regimental'.
+    """Expande uma abreviação jurídica: "espec" -> "especial", "embs" -> "embargos".
 
-    Abreviação jurídica é truncamento (prefixo) ou, mais raramente, esqueleto
-    de consoantes (subsequência com a mesma inicial). Em empate vale a ordem de
-    VOCAB_PRIORITY. Nada com menos de 2 letras é expandido.
+    Abreviação jurídica é truncamento (prefixo) ou, mais raramente, esqueleto de consoantes
+    (subsequência com a mesma inicial). No empate vale a ordem de ``VOCAB_PRIORITY``.
+
+    Parameters
+    ----------
+    token : str
+        Palavra sem o ponto, já em :func:`fold`.
+
+    Returns
+    -------
+    str or None
+        A palavra expandida; ``None`` para palavras e siglas conhecidas, numerais romanos e tokens
+        com menos de 2 letras.
     """
     if len(token) < 2 or token in LEGAL_VOCABULARY or token in _ALIASES:
         return None  # já é palavra ou sigla conhecida ("clt" não é "celetista")
@@ -111,20 +184,52 @@ _ABBREV = re.compile(r"(?<![a-z0-9.])([a-z]{2,8})\.(?![a-z0-9])")
 
 
 def canonical_words(text: str) -> str:
-    """ocr_fix_words() + abreviações por truncamento expandidas.
+    """Aplica :func:`ocr_fix_words` e expande as abreviações por truncamento.
 
-    "Agr. Int. no Rec. Espec." -> "agravo interno no recurso especial".
+    Ex.: "Agr. Int. no Rec. Espec." -> "agravo interno no recurso especial".
+
+    Parameters
+    ----------
+    text : str
+        Texto de entrada.
+
+    Returns
+    -------
+    str
+        O texto na forma canônica.
     """
     def expand(m: re.Match) -> str:
+        """Expande uma abreviação encontrada.
+
+        Parameters
+        ----------
+        m : re.Match
+            Abreviação com o ponto.
+
+        Returns
+        -------
+        str
+            A palavra expandida ou o texto original.
+        """
         return expand_abbreviation(m.group(1)) or m.group(0)
 
     return _ABBREV.sub(expand, ocr_fix_words(text))
 
 
 def is_number_marker(token: str) -> bool:
-    """Abreviações de 'número': n, nº, n.º, n°, no, nr, nro, num, núm., número (com OCR).
+    """Diz se o token abrevia "número": n, nº, n.º, n°, no, nr, nro, num, núm., número (com OCR).
 
     O "n" lido como "ri" ou "u" só conta com o sinal: "riº", "uº", "u." ("rio" é palavra).
+
+    Parameters
+    ----------
+    token : str
+        Token do texto.
+
+    Returns
+    -------
+    bool
+        ``True`` se o token é um marcador de número.
     """
     if re.fullmatch(r"(?:ri|u)\.?\s*[º°]\.?|u\.", token.strip(), re.IGNORECASE):
         return True
@@ -133,7 +238,19 @@ def is_number_marker(token: str) -> bool:
 
 
 def _numeric_token(token: str) -> str | None:
-    """Converte um token com dígitos e letras confundíveis, ou devolve None."""
+    """Converte um token com dígitos e letras confundíveis por OCR em dígitos.
+
+    Parameters
+    ----------
+    token : str
+        Token do texto.
+
+    Returns
+    -------
+    str or None
+        O token com as letras convertidas; ``None`` se não tiver dígito, se tiver letras que o OCR
+        não confunde com dígitos ou se as letras forem mais da metade.
+    """
     if not any(c.isdigit() for c in token):
         return None
     letters = [c for c in token if not c.isdigit()]
@@ -143,17 +260,44 @@ def _numeric_token(token: str) -> str | None:
 
 
 def number_digits(trecho: str) -> tuple[str, int]:
-    """Dígitos do identificador principal do trecho e nº de correções de OCR."""
+    """Lê os dígitos do identificador principal do trecho.
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+
+    Returns
+    -------
+    digits : str
+        Dígitos do número (vazio se não houver).
+    fixes : int
+        Quantidade de caracteres corrigidos por OCR.
+    """
     digits, fixes, _ = locate_number(trecho)
     return digits, fixes
 
 
 def locate_number(trecho: str) -> tuple[str, int, int]:
-    """(dígitos, correções de OCR, posição inicial) do identificador principal.
+    """Localiza e lê o identificador principal do trecho.
 
-    Junta os tokens numéricos consecutivos a partir do primeiro, separados
-    apenas por espaço, ponto ou hífen. UF, parênteses e barra encerram o número.
-    Palavras com um dígito trocado ("Agrãv0") não contam como número.
+    Junta os tokens numéricos consecutivos a partir do primeiro, separados apenas por espaço,
+    ponto ou hífen (e vírgula de milhar). UF, parênteses e barra encerram o número. Palavras com
+    um dígito trocado ("Agrãv0") não contam como número.
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+
+    Returns
+    -------
+    digits : str
+        Dígitos do número.
+    fixes : int
+        Quantidade de caracteres corrigidos por OCR.
+    start : int
+        Posição inicial do número no trecho (``len(trecho)`` se não houver).
     """
     first = None
     pos = 0
@@ -210,9 +354,19 @@ def locate_number(trecho: str) -> tuple[str, int, int]:
 
 
 def _ocr_only(token: str) -> bool:
-    """Grupo curto no meio do número: "S" em "2015.S.24", "0OS", "Gl4".
+    """Diz se um grupo curto no meio do número é OCR de dígitos: "S" em "2015.S.24", "0OS", "Gl4".
 
-    Com 2–3 caracteres precisa ter um dígito: palavras ("DO") nunca viram dígitos.
+    Com 2 ou 3 caracteres precisa ter um dígito: palavras ("DO") nunca viram dígitos.
+
+    Parameters
+    ----------
+    token : str
+        Grupo do texto.
+
+    Returns
+    -------
+    bool
+        ``True`` se o grupo deve ser lido como dígitos.
     """
     if not all(c in OCR_LETTERS or c.isdigit() for c in token):
         return False
@@ -220,16 +374,41 @@ def _ocr_only(token: str) -> bool:
 
 
 def _ocr_block(token: str, before: str, after: str) -> bool:
-    """Bloco de CNJ todo lido como letras ("700040O-GG.2023", "7.OO.0000").
+    """Diz se um bloco de CNJ foi todo lido como letras: "700040O-GG.2023", "7.OO.0000".
 
-    Só entre separadores "-"/"." e com dígito logo depois: "1.234 DO STJ" não conta.
+    Só entre separadores "-" ou "." e com dígito logo depois: "1.234 DO STJ" não conta.
+
+    Parameters
+    ----------
+    token : str
+        Bloco candidato.
+    before : str
+        Texto entre o grupo anterior e o bloco.
+    after : str
+        Texto logo depois do bloco.
+
+    Returns
+    -------
+    bool
+        ``True`` se o bloco deve ser lido como dígitos.
     """
     return (2 <= len(token) <= 4 and all(c in OCR_LETTERS for c in token)
             and before.strip() in ("-", ".", "–") and re.match(r"\s*[.\-–]\s*\d", after) is not None)
 
 
 def _looks_numeric(token: str) -> bool:
-    """O primeiro token do número precisa ser majoritariamente dígitos."""
+    """Diz se o primeiro token do número é majoritariamente dígitos.
+
+    Parameters
+    ----------
+    token : str
+        Token do texto.
+
+    Returns
+    -------
+    bool
+        ``True`` se ao menos metade dos caracteres são dígitos.
+    """
     return sum(c.isdigit() for c in token) * 2 >= len(token)
 
 
@@ -241,26 +420,74 @@ _SEP = set(" \t\n\r.-–—/\u00a0\u2009\u202f\u200b\u200c\u200d\u2060\u00ad\ufe
 
 
 def _joins(gap: str) -> bool:
-    """Separador entre dois pedaços do mesmo número: pontuação, espaços e invisíveis; vírgula só colada
-    ("4O,2023" é um número; "33.235, 2021" são dois)."""
+    """Diz se o separador entre dois pedaços pertence ao mesmo número.
+
+    Pontuação, espaços e caracteres invisíveis ligam; vírgula só quando colada ("4O,2023" é um
+    número; "33.235, 2021" são dois).
+
+    Parameters
+    ----------
+    gap : str
+        Texto entre os dois pedaços.
+
+    Returns
+    -------
+    bool
+        ``True`` se os pedaços formam um número só.
+    """
     return all(c in _SEP or (c == "," and (gap[i + 1:i + 2] or "x") not in " \t\n\r")
                for i, c in enumerate(gap))
 
 
 def number_groups(span: str) -> list[str]:
+    """Lê os números do trecho, cada um inteiro, com OCR letra -> dígito.
+
+    Parameters
+    ----------
+    span : str
+        Texto da citação.
+
+    Returns
+    -------
+    list of str
+        Dígitos de cada número, na ordem do texto (ver :func:`number_group_spans`).
+    """
     return [digits for digits, _, _ in number_group_spans(span)]
 
 
 def number_group_spans(span: str) -> list[tuple[str, int, int]]:
-    """Números do trecho, com OCR letra->dígito, cada um inteiro ("6O.685" -> "60685").
+    """Lê os números do trecho, com OCR letra -> dígito, cada um inteiro ("6O.685" -> "60685").
 
     Pedaços (dígitos ou letras parecidas) ligados só por separadores formam um grupo. Pedaço sem
-    dígito de verdade só entra se for curto e encostar em outro com dígito ("l. 627.496", "2012 G 2O"),
-    e nunca se for parte de palavra ("no 685" não vira "0685"). Grupo colado em letras ("AgInt7S57430",
-    "185do", "Vinculante10") vale se tiver ao menos dois dígitos de verdade: um dígito solto entre
-    letras ("RE5P") é OCR de palavra, não número.
+    dígito de verdade só entra se for curto e encostar em outro com dígito ("l. 627.496",
+    "2012 G 2O"), e nunca se for parte de palavra ("no 685" não vira "0685"). Grupo colado em
+    letras ("AgInt7S57430", "185do", "Vinculante10") vale se tiver ao menos dois dígitos de
+    verdade: um dígito solto entre letras ("RE5P") é OCR de palavra, não número. Datas não são
+    números de processo.
+
+    Parameters
+    ----------
+    span : str
+        Texto da citação.
+
+    Returns
+    -------
+    list of tuple of (str, int, int)
+        Para cada número: os dígitos e as posições de início e fim no trecho.
     """
     def letter(i: int) -> bool:  # "º" e "ª" são letras para o Python, mas aqui marcam ordinal
+        """Diz se há uma letra na posição (``º`` e ``ª`` marcam ordinal e não contam).
+
+        Parameters
+        ----------
+        i : int
+            Posição no trecho.
+
+        Returns
+        -------
+        bool
+            ``True`` se a posição existe e é uma letra.
+        """
         return 0 <= i < len(span) and span[i].isalpha() and span[i] not in "ºª°"
 
     pieces = []
@@ -277,6 +504,18 @@ def number_group_spans(span: str) -> list[tuple[str, int, int]]:
     real = [sum(c.isdigit() for c in p[2]) for p in pieces]
 
     def linked(i: int, j: int) -> bool:
+        """Diz se dois pedaços estão ligados só por separadores.
+
+        Parameters
+        ----------
+        i, j : int
+            Índices dos pedaços.
+
+        Returns
+        -------
+        bool
+            ``True`` se o texto entre eles liga os dois (:func:`_joins`).
+        """
         a, b = sorted((i, j))
         return _joins(span[pieces[a][1]:pieces[b][0]])
 
@@ -319,7 +558,19 @@ _DATE = re.compile(rf"\s*{_D2}\s*([/.\-])\s*{_D2}\s*\1\s*(?:[0-9OoQDlIi|SsgqGbBZ
 
 
 def cnj_key(digits: str) -> tuple[int, str] | None:
-    """Chave CNJ: (sequencial sem zeros à esquerda, DV+ano+J+TR+origem)."""
+    """Monta a chave de comparação de um número CNJ.
+
+    Parameters
+    ----------
+    digits : str
+        Número com ou sem separadores (14 a 20 dígitos).
+
+    Returns
+    -------
+    tuple of (int, str) or None
+        (sequencial sem zeros à esquerda, DV + ano + J + TR + origem); ``None`` se o número não
+        tiver entre 14 e 20 dígitos.
+    """
     digits = re.sub(r"\D", "", digits)
     if len(digits) < 14 or len(digits) > 20:
         return None
@@ -327,11 +578,34 @@ def cnj_key(digits: str) -> tuple[int, str] | None:
 
 
 def short_key(number: str) -> int:
+    """Monta a chave de comparação de um número curto (STJ, STF).
+
+    Parameters
+    ----------
+    number : str
+        Número com ou sem separadores.
+
+    Returns
+    -------
+    int
+        Os dígitos como inteiro.
+    """
     return int(re.sub(r"\D", "", number))
 
 
 def cnj_justice(key: tuple[int, str]) -> str | None:
-    """Segmento J do CNJ: 5 = Trabalho, 6 = Eleitoral, 7 = Militar."""
+    """Identifica o tribunal pelo segmento J do CNJ.
+
+    Parameters
+    ----------
+    key : tuple of (int, str)
+        Chave de :func:`cnj_key`.
+
+    Returns
+    -------
+    str or None
+        TST (J = 5), TSE (6) ou STM (7); ``None`` para outros segmentos.
+    """
     return {"5": "TST", "6": "TSE", "7": "STM"}.get(key[1][6])
 
 
@@ -341,6 +615,18 @@ UFS = frozenset(
 
 
 def trailing_uf(trecho: str) -> str | None:
+    """Lê a UF citada no fim do trecho: "/SP", "- PR", "(RJ)".
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+
+    Returns
+    -------
+    str or None
+        A sigla, se for uma UF válida.
+    """
     m = re.search(r"[/(\-–]\s*([A-Z]{2})\)?\s*$", trecho)
     return m.group(1) if m and m.group(1) in UFS else None
 
@@ -370,6 +656,18 @@ _YEAR_SUFFIX = re.compile(r"(?:/\s*|,?\s+de\s+(?:\d{1,2}o?\s+de\s+[a-z]+\s+de\s+
 
 
 def _year4(value: str) -> int:
+    """Converte um ano para quatro dígitos: "88" -> 1988, "15" -> 2015.
+
+    Parameters
+    ----------
+    value : str
+        Ano com 2 ou 4 dígitos.
+
+    Returns
+    -------
+    int
+        O ano com 4 dígitos (anos de 2 dígitos a partir de 30 são do século XX).
+    """
     year = int(value)
     if year >= 100:
         return year
@@ -383,8 +681,20 @@ _LAW_YEAR_OCR = re.compile(r"(?<=/)(?=\s*[\dOolISsZzGgqQBbD|]*\d)\s*[\dOolISsZzG
 def diploma_key(text: str) -> str | None:
     """Identifica o diploma citado, tolerando OCR, abreviações e sinônimos.
 
-    Ordem: nome/sigla conhecidos -> número da lei -> nome aproximado ->
-    radicais ("processual" + "civil" -> CPC; "consumerista" -> CDC).
+    Ordem: nome ou sigla conhecidos -> número da lei -> nome aproximado -> radicais
+    ("processual" + "civil" -> CPC; "consumerista" -> CDC). Um ano diferente do da lei que a base
+    indexa ("CPC/73") gera outra chave (``CPC/1973``): mapeá-la para o código atual
+    transformaria ``inventada`` em ``real``.
+
+    Parameters
+    ----------
+    text : str
+        Nome ou referência do diploma, ex.: "Lei nº 13.105/2015", "Constituição Fedcral".
+
+    Returns
+    -------
+    str or None
+        Chave do diploma ("CF", "CPC", "LC64/1990", "LEI:8078/1990"...) ou ``None``.
     """
     # Número e ano de lei com OCR ("13.l0s/2015", "G4/1990", "13.467/Z017"): letras
     # confundíveis viram dígitos com OCR_DIGITS, ainda com caixa (G→6, g→9).
@@ -416,6 +726,18 @@ def diploma_key(text: str) -> str | None:
 
 
 def _diploma_exact(t: str) -> str | None:
+    """Identifica o diploma pelo nome ou pelo número, conferindo o ano.
+
+    Parameters
+    ----------
+    t : str
+        Texto já normalizado por :func:`diploma_key`.
+
+    Returns
+    -------
+    str or None
+        A chave, com o ano acrescentado se for outra lei com o mesmo nome (ex.: ``CPC/1973``).
+    """
     year = None
     stripped = t
     m = _YEAR_SUFFIX.search(stripped)
@@ -430,6 +752,18 @@ def _diploma_exact(t: str) -> str | None:
 
 
 def _lookup_diploma(t: str) -> str | None:
+    """Procura o diploma nos nomes e siglas conhecidos, pelo número da lei ou por nome parecido.
+
+    Parameters
+    ----------
+    t : str
+        Texto normalizado.
+
+    Returns
+    -------
+    str or None
+        Chave do diploma; ``LEI:<número>/<ano>`` para leis fora do catálogo.
+    """
     if t in _ALIASES:
         return _ALIASES[t]
     # "Lei nº 4.737, de 15 de julho de 1965" -> "lei 4737/1965"
@@ -446,10 +780,36 @@ def _lookup_diploma(t: str) -> str | None:
 
 
 def _diploma_by_stems(t: str) -> str | None:
-    """Classificação por radicais de sentido, para nomes não catalogados."""
+    """Classifica o diploma por radicais de sentido, para nomes não catalogados.
+
+    Ex.: "diploma consumerista" -> CDC; "codex processual civil" -> CPC. Constituições estaduais,
+    leis orgânicas e regimentos não são da base e devolvem ``None``.
+
+    Parameters
+    ----------
+    t : str
+        Texto normalizado.
+
+    Returns
+    -------
+    str or None
+        Chave do diploma (com o ano, se for outro).
+    """
     words = set(re.findall(r"[a-z]+", t))
 
     def has(*stems: str) -> bool:
+        """Diz se alguma palavra do texto começa por um dos radicais.
+
+        Parameters
+        ----------
+        *stems : str
+            Radicais procurados.
+
+        Returns
+        -------
+        bool
+            ``True`` se algum radical aparece.
+        """
         return any(w.startswith(x) for w in words for x in stems)
 
     if has("estadua", "estado", "municip", "organic", "regiment"):
@@ -487,8 +847,20 @@ def _diploma_by_stems(t: str) -> str | None:
 
 
 def article_number(trecho: str) -> int | None:
-    # Mesmo conjunto de OCR do extrator (patterns.ARTICLE_NUMBER): ler
+    # Mesmo conjunto de OCR do extrator (spans.ARTICLE_NUMBER): ler
     # menos caracteres truncaria "1S0" em "1", um artigo que existe (τ).
+    """Lê o número do artigo citado ("art. 373", "artigo 1º", "art l5O" com OCR).
+
+    Parameters
+    ----------
+    trecho : str
+        Texto da citação.
+
+    Returns
+    -------
+    int or None
+        O número do artigo; ``None`` se não houver.
+    """
     m = re.search(r"(?<!\w)[aáàâão]r[tf]\w*[\s.\-–]*(?:n[º°o.]*\s*)?([\dlISLBgQZ|][\dOolIgGSBLDQZ|.]*)", trecho, re.IGNORECASE)
     if not m:
         return None
@@ -519,10 +891,20 @@ _MARKERS = [(name, re.compile(rf"(?<![a-z])(?:{pattern})", re.IGNORECASE))
 
 
 def appeal_chain(text: str) -> tuple[str, ...]:
-    """Multiconjunto ordenado dos recursos citados antes do número.
+    """Lê a cadeia recursal citada antes do número ("EDcl no AgInt no REsp").
 
-    Conta nas duas leituras (siglas originais e abreviações expandidas) e fica
-    com o máximo: "Agr. Int. no EDcl" tem AgInt só na forma expandida.
+    Conta nas duas leituras (siglas originais e abreviações expandidas) e fica com o máximo:
+    "Agr. Int. no EDcl" tem AgInt só na forma expandida.
+
+    Parameters
+    ----------
+    text : str
+        Texto antes do número.
+
+    Returns
+    -------
+    tuple of str
+        Multiconjunto ordenado dos recursos (``AGINT``, ``AGRG``, ``ED``, ``EDV``...).
     """
     readings = (ocr_fix_words(text), canonical_words(text))
     found = []
@@ -533,9 +915,21 @@ def appeal_chain(text: str) -> tuple[str, ...]:
 
 
 def chain_distance(a: tuple[str, ...], b: tuple[str, ...]) -> int:
-    """Diferença entre cadeias: primeiro pelos recursos presentes (conjunto),
-    depois pela contagem. "EDv nos EMBARGOS DE DIVERGÊNCIA" conta EDv duas
-    vezes, mas é um recurso só."""
+    """Mede a diferença entre duas cadeias recursais.
+
+    Primeiro pelos recursos presentes (conjunto), depois pela contagem: "EDv nos EMBARGOS DE
+    DIVERGÊNCIA" conta EDv duas vezes, mas é um recurso só.
+
+    Parameters
+    ----------
+    a, b : tuple of str
+        Cadeias de :func:`appeal_chain`.
+
+    Returns
+    -------
+    int
+        0 para cadeias iguais; cada recurso a mais ou a menos pesa 10.
+    """
     from collections import Counter
     ca, cb = Counter(a), Counter(b)
     return 10 * len(set(a) ^ set(b)) + sum(((ca - cb) + (cb - ca)).values())
@@ -571,10 +965,20 @@ _CLASS_PATTERNS = [(code, re.compile(rf"(?<![a-z])(?:{p})")) for code, p in CLAS
 
 
 def class_code(text: str) -> str | None:
-    """Classe processual citada mais perto do fim do texto (antes do número).
+    """Identifica a classe processual citada mais perto do fim do texto (antes do número).
 
-    Tenta primeiro a leitura com abreviações expandidas ("Rec. Espec." ->
-    recurso especial) e cai para as siglas originais ("R.Esp.").
+    Tenta primeiro a leitura com abreviações expandidas ("Rec. Espec." -> recurso especial) e cai
+    para as siglas originais ("R.Esp.").
+
+    Parameters
+    ----------
+    text : str
+        Texto antes do número.
+
+    Returns
+    -------
+    str or None
+        Sigla da classe ("REsp", "AREsp", "HC", "RR"...) ou ``None``.
     """
     for reading in (canonical_words(text), ocr_fix_words(text)):
         code = _class_code(reading)
@@ -584,6 +988,18 @@ def class_code(text: str) -> str | None:
 
 
 def _class_code(t: str) -> str | None:
+    """Escolhe a classe numa leitura: a que termina mais à direita; no empate, a mais longa.
+
+    Parameters
+    ----------
+    t : str
+        Texto numa das leituras de :func:`class_code`.
+
+    Returns
+    -------
+    str or None
+        Sigla da classe. "AgInt" só é classe quando nenhuma outra aparece.
+    """
     best = None
     for code, pattern in _CLASS_PATTERNS:
         for m in pattern.finditer(t):
@@ -606,6 +1022,21 @@ _NAME_STOP = {"min", "ministro", "ministra", "de", "da", "do", "dos", "das", "e"
 
 def name_tokens(name: str) -> list[str]:
     # Dígitos dentro de nomes são OCR: "VER5IANI", "M0rgana".
+    """Separa os tokens de um nome de pessoa, sem títulos nem preposições.
+
+    Dígitos dentro do nome são OCR ("VER5IANI", "M0rgana"); tokens de 2 letras são preposições;
+    títulos com OCR ("mlnistro", "relãtor") também saem.
+
+    Parameters
+    ----------
+    name : str
+        Nome citado ou nome do relator na base.
+
+    Returns
+    -------
+    list of str
+        Tokens do nome.
+    """
     folded = fold(name).translate(str.maketrans("01345", "oleas"))
     # Tokens de 2 letras são preposições (também com OCR: "dc", "d0"); títulos
     # com OCR ("mlnistro", "relãtor") também não são nome.
@@ -618,7 +1049,22 @@ _TITLES = ["ministro", "ministra", "relator", "relatora", "relatoria"]
 
 
 def name_matches(cited: str, record: str | None, cutoff: float = 0.75) -> bool:
-    """Todos os tokens do nome citado aparecem (com tolerância a OCR) no relator do registro."""
+    """Diz se todos os tokens do nome citado aparecem, com tolerância a OCR, no relator do registro.
+
+    Parameters
+    ----------
+    cited : str
+        Nome citado.
+    record : str or None
+        Relator do registro.
+    cutoff : float, default 0.75
+        Semelhança mínima por token (``difflib``).
+
+    Returns
+    -------
+    bool
+        ``True`` se o nome citado corresponde ao relator.
+    """
     if not record:
         return False
     rec = name_tokens(record)
@@ -635,7 +1081,18 @@ _STOPWORDS = frozenset(
 
 
 def content_terms(text: str) -> frozenset[str]:
-    """Termos de conteúdo (sem acento, sem stopwords) para comparar contexto e ementa."""
+    """Extrai os termos de conteúdo (sem acento, sem stopwords) para comparar contexto e ementa.
+
+    Parameters
+    ----------
+    text : str
+        Texto de entrada.
+
+    Returns
+    -------
+    frozenset of str
+        Palavras com 4 ou mais letras que não são stopwords.
+    """
     return frozenset(
         w for w in re.findall(r"[a-z]{4,}", strip_accents(text).lower()) if w not in _STOPWORDS
     )

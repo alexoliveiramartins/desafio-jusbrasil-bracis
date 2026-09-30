@@ -12,7 +12,7 @@
 #   2. execução, sem rede (--network none): base e textos montados só para leitura; o índice da base é
 #      montado a partir de <caminho_db> a cada execução (nada é pré-calculado sobre a base de dev);
 #   3. conversão: um JSON por documento -> <arquivo_saida> (json_to_submission.py oficial) e validação
-#      do contrato (tools/validar_saida.py).
+#      do contrato (tools/validate_output.py).
 #
 # Precisa de Docker e python3 (só biblioteca padrão). Variáveis opcionais: GPU=nvidia|amd|cpu (senão,
 # detecta), CACA_ENSEMBLE=0 (só o modelo principal), CACA_MAX_LOADED_MODELS (padrão 2), IMAGEM (nome
@@ -67,7 +67,7 @@ EOF
 )"
   if [ -n "$FALTANDO" ]; then
     echo "[run] baixando os pesos declarados (revisão fixa do Hugging Face): $FALTANDO"
-    "$PY" -m tools.baixar_modelo --dest modelos \
+    "$PY" -m tools.download_models --dest modelos \
       || echo "[run] aviso: download dos pesos falhou; a execução segue só com as regras" >&2
   fi
 fi
@@ -111,6 +111,6 @@ echo "[run] execução: $(( $(date +%s) - INICIO )) s"
 
 # 3. Conversão para o formato de submissão e validação do contrato.
 "$PY" "$RAIZ/json_to_submission.py" "$TMP/json" "$SAIDA"
-"$PY" -m tools.validar_saida --input "$TXT" --output "$TMP/json" --db "$DB" \
+"$PY" -m tools.validate_output --input "$TXT" --output "$TMP/json" --db "$DB" \
   || echo "[run] aviso: o validador acusou problemas (ver acima)" >&2
 echo "[run] saída: $SAIDA"

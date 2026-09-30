@@ -52,7 +52,7 @@
   },
   "execucao": {
     "rede": "nenhuma chamada externa em runtime: o servidor escuta só em 127.0.0.1 dentro do contêiner",
-    "pesos": "montados em /models (baixados antes com tools/baixar_modelo.py e conferidos pelo sha256)",
+    "pesos": "montados em /models (baixados antes com tools/download_models.py e conferidos pelo sha256)",
     "base": "montada em /data/ref/desafio1_bracis.db (CACA_DB)",
     "fallback": "sem pesos, hash divergente, servidor fora do ar ou orçamento de tempo excedido: saída só com as regras",
     "tempo": "~9 s/doc com um modelo e ~20 s/doc com o conjunto numa GPU de 16 GB; orçamento: média <= 40 s/doc"

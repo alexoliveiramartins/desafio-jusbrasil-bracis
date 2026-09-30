@@ -1,6 +1,6 @@
 """Confere as saídas contra o Contrato de Entrada e Saída antes de submeter.
 
-    python3 -m tools.validar_saida --input data/txt --output resultados [--db data/desafio1_bracis.db]
+    python3 -m tools.validate_output --input data/txt --output resultados [--db data/desafio1_bracis.db]
 
 Para cada .txt de --input exige <documento_id>.json em --output com todos os campos, e confere:
 trecho == texto[inicio:fim] (codepoints, arquivo lido com newline=""), tipo e classificação válidos,
@@ -21,11 +21,41 @@ FIELDS = {"inicio", "fim", "trecho", "tipo", "classificacao", "resolucao", "conf
 
 
 def _iou(a: tuple[int, int], b: tuple[int, int]) -> float:
+    """Interseção sobre união de dois spans.
+
+    Parameters
+    ----------
+    a, b : tuple of (int, int)
+        Spans ``(início, fim)`` não vazios.
+
+    Returns
+    -------
+    float
+        IoU entre 0 e 1.
+    """
     inter = max(0, min(a[1], b[1]) - max(a[0], b[0]))
     return inter / ((a[1] - a[0]) + (b[1] - b[0]) - inter) if inter else 0.0
 
 
 def check(txt_dir: Path, out_dir: Path, db: Path | None) -> list[str]:
+    """Confere as saídas de uma execução contra o contrato.
+
+    Parameters
+    ----------
+    txt_dir : pathlib.Path
+        Pasta dos ``.txt`` de entrada.
+    out_dir : pathlib.Path
+        Pasta dos ``<documento_id>.json`` de saída.
+    db : pathlib.Path or None
+        Base canônica; se existir, cada ``id_canonico`` de ``real`` precisa estar na tabela
+        ``documentos``.
+
+    Returns
+    -------
+    list of str
+        Problemas encontrados (vazia se tudo confere). Também imprime o total de documentos,
+        citações e problemas.
+    """
     ids = None
     if db and db.is_file():
         with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
@@ -77,6 +107,13 @@ def check(txt_dir: Path, out_dir: Path, db: Path | None) -> list[str]:
 
 
 def main() -> int:
+    """Valida uma pasta de saídas e imprime até 50 problemas.
+
+    Returns
+    -------
+    int
+        0 se as saídas cumprem o contrato; 1 se há qualquer problema.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

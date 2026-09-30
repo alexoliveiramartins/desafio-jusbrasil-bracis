@@ -24,7 +24,7 @@ reports/
 .env
 tempCodeRunnerFile.py
 
-# Pesos do modelo (baixados com tools/baixar_modelo.py; não vão para o git nem para a imagem)
+# Pesos do modelo (baixados com tools/download_models.py; não vão para o git nem para a imagem)
 modelos/
 # Saídas e pacotes de submissão (regeneráveis)
 saida/

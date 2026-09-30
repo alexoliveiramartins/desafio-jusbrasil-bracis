@@ -1,9 +1,9 @@
 # Versão alternativa, só com regras (sem modelo): biblioteca padrão do Python, sem GPU, sem rede.
-#   docker build -f Dockerfile.regras -t caca-alucinacoes-regras .
+#   docker build -f Dockerfile.rules -t caca-alucinacoes-rules .
 #   docker run --rm --network none \
 #     -v "$PWD/data/desafio1_bracis.db:/data/ref/desafio1_bracis.db:ro" \
 #     -v "$PWD/data/txt:/data/in:ro" -v "$PWD/saida:/data/out" \
-#     caca-alucinacoes-regras --input /data/in --output /data/out
+#     caca-alucinacoes-rules --input /data/in --output /data/out
 # Regra da competição: dados não vão dentro da imagem. A base canônica é montada em
 # /data/ref (CACA_DB); sem ela o contêiner termina com erro explicando o que montar.
 FROM python:3.12.3-slim@sha256:afc139a0a640942491ec481ad8dda10f2c5b753f5c969393b12480155fe15a63
