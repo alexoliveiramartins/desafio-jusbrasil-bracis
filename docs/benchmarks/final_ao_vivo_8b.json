@@ -1,0 +1,98 @@
+{
+  "v5_holdout2": {
+    "nlp@hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M": {
+      "score": 1.0959,
+      "N1": 1.096,
+      "N2": 1.0958,
+      "tau": 0.0,
+      "spans": 0.9928,
+      "novas": 18,
+      "normalizadas": 1,
+      "s_por_doc": 10.81
+    }
+  },
+  "v5_holdout2_ruido": {
+    "nlp@hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M": {
+      "score": 1.0908,
+      "N1": 1.0921,
+      "N2": 1.0901,
+      "tau": 0.0,
+      "spans": 0.9835,
+      "novas": 12,
+      "normalizadas": 4,
+      "s_por_doc": 10.83
+    }
+  },
+  "data/stress/leve_s8800": {
+    "nlp@hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M": {
+      "score": 1.0999,
+      "N1": 1.0999,
+      "N2": 1.0999,
+      "tau": 0.0,
+      "spans": 1.0,
+      "novas": 1,
+      "normalizadas": 1,
+      "s_por_doc": 9.28
+    }
+  },
+  "data/stress/moderado_s8800": {
+    "nlp@hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M": {
+      "score": 1.0665,
+      "N1": 1.0656,
+      "N2": 1.0669,
+      "tau": 0.0,
+      "spans": 0.9531,
+      "novas": 2,
+      "normalizadas": 1,
+      "s_por_doc": 10.62
+    }
+  },
+  "data/stress/pesado_s8800": {
+    "nlp@hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M": {
+      "score": 1.0404,
+      "N1": 1.0742,
+      "N2": 1.0235,
+      "tau": 0.0,
+      "spans": 0.9427,
+      "novas": 15,
+      "normalizadas": 2,
+      "s_por_doc": 10.04
+    }
+  },
+  "data/stress/extremo_s8800": {
+    "nlp@hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M": {
+      "score": 1.0246,
+      "N1": 1.0521,
+      "N2": 1.0109,
+      "tau": 0.0,
+      "spans": 0.9219,
+      "novas": 14,
+      "normalizadas": 3,
+      "s_por_doc": 11.18
+    }
+  },
+  "llm_gaia_holdout": {
+    "nlp@hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M": {
+      "score": 1.0834,
+      "N1": 1.0992,
+      "N2": 1.0755,
+      "tau": 0.0,
+      "spans": 0.9724,
+      "novas": 5,
+      "normalizadas": 3,
+      "s_por_doc": 5.53
+    }
+  },
+  "llm_llama_holdout": {
+    "nlp@hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M": {
+      "score": 1.0691,
+      "N1": 1.0337,
+      "N2": 1.0867,
+      "tau": 0.0,
+      "spans": 0.9565,
+      "novas": 7,
+      "normalizadas": 4,
+      "s_por_doc": 5.77
+    }
+  }
+}

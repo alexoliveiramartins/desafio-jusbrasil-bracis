@@ -404,3 +404,42 @@ class OcrRobustnessRulesTest(unittest.TestCase):
         out = process_text("t", "no Agravo\n cm Recurso Especial do STJ, de 2025, Rel. Min. SÉRGIO KUKINA.",
                            self.index)["citacoes"]
         self.assertEqual(out[0]["resolucao"]["id_canonico"], "5900603883")  # AREsp, não REsp
+
+
+class OutputContractTest(unittest.TestCase):
+    """A métrica recusa a submissão inteira se duas citações de um documento têm IoU >= 0,5."""
+
+    @staticmethod
+    def cit(start, end, conf):
+        from src.classify import INCOMPLETA, Resolution
+        return {"inicio": start, "fim": end, "resolution": Resolution(INCOMPLETA, None, conf, "teste")}
+
+    def test_duplicates_keep_one_by_confidence_then_length(self):
+        from src.main import without_duplicates
+        a, b, c = self.cit(0, 10, 0.40), self.cit(1, 10, 0.92), self.cit(30, 40, 0.40)
+        self.assertEqual(without_duplicates([a, b, c]), [b, c])
+        longer, shorter = self.cit(0, 12, 0.85), self.cit(0, 10, 0.85)
+        self.assertEqual(without_duplicates([shorter, longer]), [longer])
+
+    def test_partial_overlap_below_threshold_is_kept_in_order(self):
+        from src.main import without_duplicates
+        first, second = self.cit(0, 10, 0.40), self.cit(8, 20, 0.92)  # IoU 2/20
+        self.assertEqual(without_duplicates([first, second]), [first, second])
+
+    def test_validator_flags_duplicates(self):
+        import json
+        import tempfile
+        from tools.validar_saida import check
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "in").mkdir()
+            (tmp / "out").mkdir()
+            (tmp / "in" / "d.txt").write_text("REsp 1.234.567/SP e mais", encoding="utf-8")
+            cit = {"trecho": "REsp 1.234.567/SP", "tipo": "jurisprudencia", "classificacao": "inventada",
+                   "resolucao": None, "confianca": 0.9}
+            doc = {"documento_id": "d", "citacoes": [cit | {"inicio": 0, "fim": 17},
+                                                      cit | {"inicio": 0, "fim": 14, "trecho": "REsp 1.234.567"}]}
+            (tmp / "out" / "d.json").write_text(json.dumps(doc), encoding="utf-8")
+            problems = check(tmp / "in", tmp / "out", None)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("IoU", problems[0])

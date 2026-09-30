@@ -17,10 +17,35 @@ documentos do dev em ~3 s; a camada de NLP acrescenta ~8–10 s por documento nu
 Se a camada não puder rodar (sem pesos, sem servidor, sem tempo), a imagem da submissão cai
 sozinha para a versão só com regras.
 
+## Avaliação final: ponto de entrada único
+
+```bash
+bash run.sh <caminho_db> <pasta_txt> <arquivo_saida>
+# ex.: bash run.sh data/desafio1_bracis.db data/txt saida/submission.csv
+```
+
+Recebe a base canônica (qualquer `.db` no formato original), a pasta com os `.txt` e grava
+`<arquivo_saida>` no formato de submissão (`documento_id,citacoes`, o mesmo do `json_to_submission.py`
+oficial). Precisa só de Docker e `python3` (biblioteca padrão). Em máquina limpa, o `run.sh`:
+
+1. **prepara** o que faltar, e só essa etapa usa internet: baixa os pesos declarados em
+   [`model_manifest.json`](model_manifest.json) (Hugging Face, revisão fixa, sha256 conferido) para
+   `modelos/` e constrói a imagem Docker da GPU encontrada (NVIDIA, AMD ou nenhuma);
+2. **executa sem rede** (`--network none`), com a base e os textos montados só para leitura. O índice
+   da base é montado a partir do `.db` recebido a cada execução; nada é pré-calculado sobre a base de
+   dev, então um `.db` novo funciona sem nenhum passo extra;
+3. **converte** os JSONs para o CSV de submissão e confere o contrato (`tools/validar_saida.py`).
+
+Com GPU, roda regras + o conjunto Qwen3-4B + Qwen3-8B (~12 GB de VRAM, ~18 s por documento, mais
+~10 min de partida para conferir e importar os pesos; ~30 GB de disco no total). Sem GPU, ou se a
+camada de NLP não subir, segue sozinha só com as regras. Opcionais: `GPU=nvidia|amd|cpu` força o
+fabricante; `CACA_ENSEMBLE=0` usa só o modelo principal.
+
 ## Como submeter
 
-**Leaderboard (Kaggle):** envie o `submission.csv` (formato de `data/sample_submission.csv`: uma
-linha por documento, `documento_id,citacoes`). No dev, as duas versões geram o mesmo arquivo.
+**Leaderboard (Kaggle, fase referencial):** envie o `submission.csv` (formato de
+`data/sample_submission.csv`: uma linha por documento, `documento_id,citacoes`). No dev, as duas versões
+geram o mesmo arquivo, e o `run.sh` acima gera exatamente esse formato.
 
 ```bash
 python3 -m src.main --input data/txt --output resultados            # um JSON completo por documento
@@ -29,13 +54,14 @@ python3 json_to_submission.py resultados submission.csv             # JSONs -> C
 python3 -m tools.empacotar_saidas --output resultados --zip saidas.zip   # .zip só com os JSONs, se pedirem
 ```
 
-**Pacote de verificação (reexecução pela organização):** este repositório, com `Dockerfile`
-(imagem da submissão), `model_manifest.json` (HF id + revisão + sha256), `tools/baixar_modelo.py`
-(baixa os pesos declarados) e este README. Antes de entregar, rode a verificação de ponta a ponta,
-que constrói as imagens e executa o contrato como a organização vai executar:
+**Entrega final (e-mail para desafio-bracis@jusbrasil.com.br até 01/10, 23h59):** nome da equipe e
+integrantes, link deste repositório e o hash do commit da versão final. A organização executa o
+`run.sh` sobre o `.db` e os documentos do conjunto final. Antes de entregar, confira de ponta a ponta
+(build, nenhum dado na imagem, `--network none`, contrato, nota, estabilidade entre execuções, fallback):
 
 ```bash
-bash tools/verificar_submissao.sh      # build, sem dados na imagem, --network none, contrato, nota, determinismo, fallback
+bash run.sh data/desafio1_bracis.db data/txt /tmp/saida.csv   # o ponto de entrada, como a organização vai rodar
+bash tools/verificar_submissao.sh                             # verificação completa das imagens
 ```
 
 ## Como rodar
@@ -59,8 +85,8 @@ Base e pesos **não vão dentro das imagens**: são montados em runtime. Nenhuma
 chamada de rede; ambas rodam com `--network none`.
 
 ```bash
-# submissão: regras + NLP
-python3 -m tools.baixar_modelo --dest modelos      # com rede, ANTES: revisão fixa do HF + sha256
+# submissão: regras + NLP (conjunto Qwen3-4B + Qwen3-8B)
+python3 -m tools.baixar_modelo --dest modelos      # com rede, ANTES: revisões fixas do HF + sha256
 docker build -t caca-alucinacoes .
 docker run --rm --network none --gpus all \
   -v "$PWD/data/desafio1_bracis.db:/data/ref/desafio1_bracis.db:ro" -v "$PWD/modelos:/models:ro" \
@@ -75,23 +101,39 @@ docker run --rm --network none \
   caca-alucinacoes-regras --input /data/in --output /data/out
 ```
 
-Os pesos podem estar em qualquer layout dentro de `/models`: arquivo solto, `huggingface-cli download
---revision <rev> --local-dir` ou cache do HF (`snapshots/<revisão>/`); o sha256 é conferido na
-partida. Em GPU AMD, construa com `--build-arg OLLAMA_IMAGE=<imagem_rocm do manifesto>` e troque
-`--gpus all` por `--device /dev/kfd --device /dev/dri`.
+O mesmo `Dockerfile` serve às duas GPUs; o fabricante é escolhido no build:
+
+| GPU | build | run (no lugar de `--gpus all`) |
+|---|---|---|
+| NVIDIA (CUDA, padrão) | `docker build -t caca-alucinacoes .` | `--gpus all` |
+| AMD (ROCm) | `docker build --build-arg GPU=amd -t caca-alucinacoes .` | `--device /dev/kfd --device /dev/dri` |
+| sem GPU | `docker build --build-arg GPU=cpu -t caca-alucinacoes .` | (nada; lento, o orçamento desliga a camada) |
+
+Variáveis opcionais do contêiner (`-e NOME=valor`): `CACA_ENSEMBLE=0` usa só o modelo principal (para GPUs
+com menos de ~12 GB livres); `CACA_MAX_LOADED_MODELS` (padrão 2) mantém os dois modelos carregados juntos,
+~10 GB de VRAM. Evite `CACA_MAX_LOADED_MODELS=1` com o conjunto: ele troca de modelo a cada documento, é mais
+lento, e numa RX 9070 XT (ROCm) essa troca contínua travou a máquina. `CACA_VERIFY_SHA=0` pula a conferência
+do sha256 na partida.
+
+Na partida, o contêiner informa o acelerador que o Ollama encontrou (`[launcher] acelerador: cuda NVIDIA …`,
+`rocm AMD Radeon …`) ou avisa que está em CPU. Os pesos podem estar em qualquer layout dentro de `/models`:
+arquivo solto, `huggingface-cli download --revision <rev> --local-dir` ou cache do HF (`snapshots/<revisão>/`);
+o sha256 é conferido na partida.
 
 ### Conformidade com as regras de execução
 
-| Regra (e-mail da organização, 28/08/2026) | Como é cumprida |
+| Regra (e-mails da organização de 28/08 e 29/09/2026) | Como é cumprida |
 |---|---|
-| Só pesos abertos e públicos, com link HF + revisão fixa | [`model_manifest.json`](model_manifest.json): `unsloth/Qwen3-4B-Instruct-2507-GGUF` na revisão `a06e946…`, arquivo e sha256 fixos; base `Qwen/Qwen3-4B-Instruct-2507` (Apache-2.0). Sem fine-tune, sem modelo gated, sem API |
-| 1 GPU 24 GB, 8 vCPUs, 32 GB; média ≤ 60 s/doc; 4 h no total | modelo de 4B quantizado (~4 GB de VRAM); ~8–10 s/doc medidos numa GPU de 16 GB. A camada tem orçamento próprio: se a média passar de 40 s/doc ou o total de 3 h (ex.: sem GPU), ela se desliga e o resto sai só com as regras |
-| Contêiner sem rede; nada externo em runtime | o Ollama sobe dentro do contêiner, só em `127.0.0.1`; os pesos vêm de `/models`, baixados antes por `tools/baixar_modelo.py` e conferidos pelo sha256 no início da execução |
-| Pesos e dados fora da imagem | `.dockerignore` só deixa entrar `src/`, o manifesto e o Modelfile; base em `/data/ref` e pesos em `/models`, montados |
-| Dockerfile com dependências fixas | imagens-base fixadas por digest (`python:3.12.3-slim`, `ollama/ollama:0.33.2`); o pipeline não tem dependência fora da biblioteca padrão |
-| Entrypoint no contrato padrão | `docker run <img> --input /data/in --output /data/out` nas duas imagens |
-| Seed e decodificação determinística | `temperature 0` (gulosa), `seed 42`, um pedido por vez no servidor (`OLLAMA_NUM_PARALLEL=1`), saída JSON restrita por schema, teto de 4096 tokens |
-| Score reproduzido não pode cair > 5% | qualquer falha da camada (sem pesos, hash divergente, servidor fora do ar, tempo) cai para a versão só com regras, que é determinística e reproduz o score dela exatamente |
+| Ponto de entrada único: recebe o `.db` e a pasta dos `.txt` e gera a saída no formato da submissão | `bash run.sh <caminho_db> <pasta_txt> <arquivo_saida>` (seção acima); por dentro, a imagem segue o contrato `docker run <img> --input /data/in --output /data/out` |
+| Avaliação com um `.db` novo e documentos novos, no formato do dev | o índice (números próprios dos acórdãos, súmulas, dispositivos, relatores) é montado a partir do `.db` recebido a cada execução; nada é pré-calculado sobre a base de dev. As tabelas curadas de `src/classify.py` só valem para registros sem cabeçalho que existam na base recebida |
+| Do zero, em máquina limpa; sem caminhos absolutos, passos manuais ou arquivos só da equipe | o `run.sh` baixa os pesos declarados e constrói a imagem se faltarem; todos os caminhos são relativos ao repositório ou vêm dos argumentos |
+| Pesos incluídos ou referenciados em revisão fixa, baixáveis antes da execução | [`model_manifest.json`](model_manifest.json): principal `unsloth/Qwen3-4B-Instruct-2507-GGUF` (revisão `a06e946…`; base `Qwen/Qwen3-4B-Instruct-2507`) e, no conjunto, `Qwen/Qwen3-8B-GGUF` (revisão `7c41481…`; base `Qwen/Qwen3-8B`), arquivos e sha256 fixos, todos Apache-2.0. Sem fine-tune, sem modelo gated, sem API |
+| GPU com até 24 GB de VRAM | dois modelos quantizados carregados juntos: ~12 GB de VRAM; 18,5 s/doc na imagem Docker numa GPU de 16 GB (~9 s/doc só com o principal), mais ~10 min de partida. A camada tem orçamento próprio (média de 40 s/doc, sem contar o 1º documento, que carrega os modelos; 3 h no total) e, se passar, o resto sai só com as regras |
+| Offline: nada de internet nem APIs externas na execução | contêiner com `--network none`; o Ollama sobe dentro dele, só em `127.0.0.1` e com `OLLAMA_NO_CLOUD=1` (sem ela, ele tenta acessar `ollama.com` na partida); os pesos vêm de `/models`, conferidos pelo sha256 no início |
+| Pesos e dados fora da imagem | `.dockerignore` só deixa entrar `src/`, o manifesto e os Modelfiles (`docker/nlp/`); base e pesos são montados |
+| Ambiente declarado (Docker), dependências fixas | imagens-base fixadas por digest (`python:3.12.3-slim`, `ollama/ollama:0.33.2`, `-rocm` para AMD); o pipeline não tem dependência fora da biblioteca padrão |
+| Seeds fixas, sem amostragem não determinística | `temperature 0` (gulosa), `seed 42`, um pedido por vez no servidor (`OLLAMA_NUM_PARALLEL=1`), saída JSON restrita por schema. O *texto* gerado na GPU não é idêntico bit a bit entre execuções (64% das respostas iguais); a classe continua decidida pela base: duas execuções seguidas da imagem deram a mesma nota (1,0999, diferença 0,0000), e a variação máxima medida foi 0,004 |
+| Disco (referência: ~100 GB) | ~30 GB: pesos 7,5 GB, imagem 4,2 GB e ~15 GB de importação dos pesos dentro do contêiner |
 
 ### Nota local
 
@@ -159,6 +201,17 @@ O modelo **nunca decide a classe**. Os campos que ele lê viram uma forma canôn
 
 Decodificação determinística (temperature 0, seed 42, um pedido por vez) e orçamento de tempo: média
 acima de 40 s/doc ou total acima de 3 h desliga a camada, e o resto sai só com as regras.
+
+**Reprodutibilidade medida.** Na medição final, cada resposta ao vivo foi comparada com a resposta guardada para o
+mesmo pedido: 64% idênticas, 36% com texto diferente (mesmo modelo, mesmos parâmetros gulosos), por não
+determinismo numérico da GPU. Nos seis conjuntos comparados, a nota ficou igual em quatro e variou +0,001 e
++0,004 nos outros dois; τ = 0 em todas as execuções.
+
+**Cache (só laboratório).** As ferramentas de avaliação (`tools.nlp_bench`, `tools.calibrate`) guardam a
+resposta bruta do modelo em `.cache/nlp/<modelo>/<sha256 do pedido>.json`. Como a decodificação é determinística,
+isso permite reavaliar mudanças nas guardas sem refazer a leitura na GPU. O cache não guarda gabarito nem
+decisão, fica fora da imagem (`.dockerignore`) e vem desligado no pipeline (`--nlp-cache` não é passado pelo
+entrypoint): na execução oficial, cada documento é lido ao vivo pelo modelo.
 
 ## Avaliação sem overfitting
 
@@ -276,8 +329,10 @@ citações do dev, e em 12 conjuntos (~6.000 citações) só 1 citação que a s
 ## Resultados
 
 Métrica oficial (`kaggle_metric.py`; máximo 1,10 com o bônus de calibração), τ = fração das
-inventadas do gabarito preditas como `real` (o erro grave). Modelo: Qwen3-4B-Instruct-2507 (GGUF
-Q4_K_M), ~9 s/documento numa GPU de 16 GB.
+inventadas do gabarito preditas como `real` (o erro grave). Versão entregue: conjunto Qwen3-4B-Instruct-2507 +
+Qwen3-8B (GGUF Q4_K_M), ~18 s/documento numa GPU de 16 GB com os dois carregados (~9 s/documento só com o 4B).
+As tabelas das rodadas 1 e 2 abaixo mostram o 4B, que era a configuração medida naquela época; a versão final
+e a rodada 3 mostram também o 8B e o conjunto.
 
 **Dev (goldenset oficial, 26 documentos):** 1,0999 nas duas versões, τ = 0, 192/192 spans exatos. No
 dev a camada de NLP não altera nenhuma citação.
@@ -296,12 +351,79 @@ dev a camada de NLP não altera nenhuma citação.
 | `llm_holdout` | peças escritas por LLM (Qwen2.5) | 0,9999 | **1,0821** | 0 |
 | **média** | | 1,0379 | **1,0743** | 0 |
 
+**Conjuntos de iteração** (código final, respostas do modelo guardadas; 24 conjuntos, 10.288 citações; onde as decisões foram tomadas):
+
+| Conjunto | só regras | NLP 4B | NLP 8B | **NLP 4B+8B** (entregue) |
+|---|---:|---:|---:|---:|
+| dev (oficial) | 1,0999 | 1,0999 | 1,0999 | **1,0999** |
+| `v5_iter` / `v5_iter_ruido` / `v5_iter_denso` | 1,0979 / 1,0973 / 1,0988 | 1,0995 / 1,0995 / 1,0996 | 1,0987 / 1,0995 / 1,0996 | **1,0995 / 1,0995 / 1,0996** |
+| `denso` / `val` | 1,0995 / 1,0987 | 1,0995 / 1,0996 | 1,0995 / 1,0996 | **1,0995 / 1,0996** |
+| `v5_holdout` / `v5_holdout_ruido` (holdout da rodada 1) | 1,0801 / 1,0714 | 1,0957 / 1,0845 | 1,0968 / 1,0854 | **1,0968 / 1,0864** |
+| `armadilhas` / `poluido` | 1,0985 / 1,0926 | 1,0985 / 1,0926 | 1,0985 / 1,0936 | **1,0985 / 1,0936** |
+| `ineditos` / `ineditos_poluido` | 1,0971 / 1,0925 | 1,0996 / 1,0934 | 1,0996 / 1,0925 | **1,0996 / 1,0934** |
+| `ineditos_v3` / `ineditos_v3_poluido` | 1,0955 / 1,0868 | 1,0962 / 1,0885 | 1,0972 / 1,0892 | **1,0962 / 1,0892** |
+| `llm_iter` / `llm_holdout` (peças do Qwen2.5) | 1,0210 / 0,9999 | 1,0241 / 1,0821 | 1,0237 / 1,0821 | **1,0191 / 1,0821** |
+| `llm_llama_iter` (peças do Llama) | 0,9255 | 0,9963 | 0,9963 | **1,0056** |
+| estresse leve s7700 | 1,0829 | 1,0960 | 1,0960 | **1,0960** |
+| estresse moderado s3000 / s7700 | 1,0626 / 1,0658 | 1,0843 / 1,0907 | 1,0955 / 1,0887 | **1,0955 / 1,0927** |
+| estresse pesado s3000 / s7700 | 1,0074 / 1,0071 | 1,0700 / 1,0576 | 1,0590 / 1,0557 | **1,0700 / 1,0576** |
+| estresse extremo s3000 / s7700 | 0,8706 / 1,0094 | 1,0133 / 1,0444 | 0,9890 / 1,0300 | **1,0350 / 1,0444** |
+| **média** | 1,0566 | 1,0794 | 1,0777 | **1,0812** |
+
+τ = 0 em todas as células. Os números dos 39 conjuntos estão em [`docs/benchmarks/`](docs/benchmarks): `tabela_codigo_atual.json` (iteração e rodadas 1 e 2, com as respostas guardadas), `final_ao_vivo_*.json` e `rodada3_*.json` (medições únicas ao vivo), e o resumo com apêndice em `Caca-Alucinacoes_solucao_e_numeros.pdf`.
+
 Depois da rodada 1, as regras ganharam leitura numérica robusta a OCR colado, descritivas de qualquer
 classe ("RR de 2016, Rel. Min. …"), preposição com OCR ("cla CLT"), número de lei com hífen e os
 apelidos "CR/88" e "NCPC"; a camada ganhou guardas mais tolerantes a OCR. A rodada 2 do holdout
 (conjuntos novos, inclusive peças escritas por Llama e Gemma-Gaia) mede a versão final.
 
-RODADA_2_AQUI
+**Holdout, rodada 2** (conjuntos gerados depois do congelamento seguinte; peças escritas pelo Gemma-3-Gaia-PT-BR,
+autor nunca usado em iteração, e pelo Llama-3.1; medido uma vez com aquele código):
+
+| Conjunto | só regras | regras + NLP | τ |
+|---|---:|---:|:---:|
+| `v5_holdout2` (formas inéditas) | 1,0775 | **1,0857** | 0 |
+| `v5_holdout2_ruido` | 1,0750 | **1,0772** | 0 |
+| estresse leve / moderado | 1,0945 / 1,0619 | **1,0999 / 1,0693** | 0 |
+| estresse pesado / extremo | 0,9779 / 0,9717 | **1,0322 / 1,0202** | 0 |
+| `llm_gaia_holdout` (Gemma-Gaia) | 1,0435 | **1,0834** | 0 |
+| `llm_llama_holdout` (Llama) | 1,0324 | **1,0691** | 0 |
+| **média** | 1,0418 | **1,0671** | 0 |
+
+**Versão final (a entregue), mesmos conjuntos da rodada 2, medida uma vez AO VIVO** (cache novo e vazio,
+um modelo carregado por vez; nenhum erro desses conjuntos foi diagnosticado):
+
+| Conjunto | só regras | NLP 4B | NLP 8B | **NLP 4B+8B** (entregue) | τ |
+|---|---:|---:|---:|---:|:---:|
+| `v5_holdout2` | 1,0775 | 1,0936 | 1,0959 | **1,0954** | 0 |
+| `v5_holdout2_ruido` | 1,0750 | 1,0912 | 1,0908 | **1,0925** | 0 |
+| estresse leve / moderado | 1,0945 / 1,0619 | 1,0999 / 1,0705 | 1,0999 / 1,0665 | **1,0999 / 1,0705** | 0 |
+| estresse pesado / extremo | 0,9779 / 0,9717 | 1,0322 / 1,0355 | 1,0404 / 1,0246 | **1,0413 / 1,0355** | 0 |
+| `llm_gaia_holdout` / `llm_llama_holdout` | 1,0435 / 1,0324 | 1,0834 / 1,0691 | 1,0834 / 1,0691 | **1,0834 / 1,0691** | 0 |
+| **média** | 1,0418 | 1,0719 | 1,0713 | **1,0735** | 0 |
+
+O conjunto (união para achar citações, concordância para normalizar, conflito devolve a resposta das regras)
+fica >= o 4B sozinho em todos os conjuntos; o 4B sozinho é o caminho quando o 8B falta (`CACA_ENSEMBLE=0`).
+
+**Holdout, rodada 3: a medida limpa** (7 conjuntos gerados depois do congelamento final, nunca usados para
+decidir nada; medidos uma única vez, ao vivo, sem olhar os erros):
+
+| Conjunto | só regras | NLP 4B | NLP 8B | **NLP 4B+8B** (entregue) | τ |
+|---|---:|---:|---:|---:|:---:|
+| `v5_holdout3` (formas inéditas) | 1,0835 | 1,0926 | 1,0926 | **1,0935** | 0 |
+| `v5_holdout3_ruido` | 1,0721 | 1,0882 | 1,0929 | **1,0917** | 0 |
+| estresse leve / moderado | 1,0918 / 1,0483 | 1,0962 / 1,0631 | 1,0950 / 1,0660 | **1,0962 / 1,0688** | 0 |
+| estresse pesado / extremo | 1,0255 / 0,9344 | 1,0875 / 1,0198 | 1,0801 / 1,0109 | **1,0875 / 1,0324** | 0 |
+| `llm_gaia_holdout3` (Gemma-Gaia) | 0,9392 | 0,9614 | 0,9395 | **0,9691** | 0 |
+| **média** | 1,0278 | 1,0584 | 1,0539 | **1,0627** | 0 |
+
+O ganho sobre as regras se repete em conjuntos nunca vistos: +0,035 na média (rodada 2: +0,032). O conjunto fica
+>= o 4B sozinho em todos os conjuntos; o 8B sozinho às vezes fica até 0,001 acima dele, mas perde na média e nos
+casos mais difíceis (extremo: 1,0109 contra 1,0324 do conjunto).
+
+**Verificação da imagem Docker** (`tools/verificar_submissao.sh`, AMD RX 9070 XT, os dois modelos carregados juntos,
+~11,9 GB de VRAM): imagem sem base nem pesos, `--network none`, 0 problemas de contrato, nota 1,0999 em duas
+execuções (diferença 0,0000) e 1,0999 no fallback sem pesos; 18,5 s/doc, mais ~10 min de partida.
 
 ## Premissas (não confirmadas pelo dev)
 
@@ -309,9 +431,15 @@ RODADA_2_AQUI
   não `inventada`: nos sintéticos, isso vinha de OCR no nome do relator, e o gabarito não tem
   descritiva inventada.
 - Lei citada sem artigo ("Lei nº 13.467/2017") e referências vagas ("reiterados precedentes do
-  STJ") não são citações: o goldenset atual não as anota.
+  STJ", "jurisprudência pacífica desta Corte") não são citações: o goldenset atual não as anota. A
+  descrição dos dados no Kaggle ainda diz que as vagas são `incompleta`, mas ela é da versão de 01/09
+  (225 citações, 31 vagas anotadas); a organização as retirou do gabarito (225 → 195 → 192), e o
+  leaderboard confirma a regra atual (29/09: este pipeline tira 1,0999 lá; uma submissão com as vagas
+  tirava 1,10 só na versão antiga). Se a regra voltar no conjunto final, as regras perdem ~0,126
+  no dev original (medido: 0,9741).
 - Número real com relator citado divergente continua `real` (resolve a um registro), mas com
   confiança 0,60.
-- `data/txt/gen_n1_003`, `gen_n1_006` e `gen_n1_010` foram ajustados ao goldenset atualizado
-  (inserção de "AgInt no " e "ED no AgR no "). Com isso, os 192 spans batem exatamente.
-  Substitua pelos textos oficiais quando a organização os distribuir.
+- `data/` é idêntico ao pacote oficial de 15/09 (base, `goldenset_offsets.csv` → `data/goldenset.csv`,
+  26 `.txt`, métrica, conversor e `sample_submission.csv`); `python3 -m tools.verify_official_data`
+  confere os hashes. Os textos `gen_n1_003`, `gen_n1_006` e `gen_n1_010` já são os oficiais atualizados
+  (com "AgInt no " e "ED no AgR no "), e os 192 spans batem exatamente.

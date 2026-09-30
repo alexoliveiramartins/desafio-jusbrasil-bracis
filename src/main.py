@@ -56,6 +56,30 @@ def extract(content: str, known_relators: list[frozenset] = ()) -> list[dict]:
     return citations
 
 
+# A métrica oficial recusa a submissão INTEIRA se duas citações de um documento se sobrepõem com IoU >= 0,5.
+DUPLICATE_IOU = 0.5
+
+
+def _iou(a: dict, b: dict) -> float:
+    inter = max(0, min(a["fim"], b["fim"]) - max(a["inicio"], b["inicio"]))
+    return inter / ((a["fim"] - a["inicio"]) + (b["fim"] - b["inicio"]) - inter) if inter else 0.0
+
+
+def without_duplicates(citations: list[dict]) -> list[dict]:
+    """Garantia do contrato: de um grupo de citações com IoU >= 0,5 fica uma só.
+
+    Fica a de maior confiança; no empate, a mais longa; depois, a primeira. A ordem original se mantém.
+    """
+    ranked = sorted(range(len(citations)), key=lambda i: (-citations[i]["resolution"].confianca,
+                                                         -(citations[i]["fim"] - citations[i]["inicio"]),
+                                                         citations[i]["inicio"], i))
+    kept = []
+    for i in ranked:
+        if all(_iou(citations[i], citations[k]) < DUPLICATE_IOU for k in kept):
+            kept.append(i)
+    return [citations[i] for i in sorted(kept)]
+
+
 def process_text(documento_id: str, content: str, index: CanonicalIndex, debug: bool = False,
                  nlp: NLPLayer | None = None) -> dict:
     citations = []
@@ -71,6 +95,7 @@ def process_text(documento_id: str, content: str, index: CanonicalIndex, debug: 
         citations.append(citation)
     if nlp is not None:
         citations = nlp.refine(content, citations, index)
+    citations = without_duplicates(citations)
     output = []
     for citation in citations:
         resolution = citation["resolution"]
@@ -108,6 +133,10 @@ def main(argv=None) -> int:
     parser.add_argument("--nlp-model", default=DEFAULT_MODEL, help="modelo GGUF do Hugging Face no Ollama")
     parser.add_argument("--nlp-url", default=DEFAULT_URL, help="servidor Ollama")
     parser.add_argument("--nlp-cache", type=Path, default=None, help="pasta de cache das respostas do modelo")
+    parser.add_argument("--nlp-second-pass", action="store_true",
+                        help="segunda passada do modelo nas frases com pistas de citação não cobertas")
+    parser.add_argument("--nlp-extra-model", action="append", default=[],
+                        help="outro modelo (conjunto): união para citações novas, acordo para normalizar")
     parser.add_argument("--nlp-budget-doc", type=float, default=40.0,
                         help="média máxima de segundos por documento na camada (depois ela se desliga)")
     parser.add_argument("--nlp-budget-total", type=float, default=3 * 3600.0,
@@ -117,7 +146,8 @@ def main(argv=None) -> int:
         print(f"base canônica não encontrada: {args.db} (monte-a e passe --db ou CACA_DB)", file=sys.stderr)
         return 2
     nlp = from_args(args.nlp, args.nlp_url, args.nlp_model, args.nlp_cache,
-                    budget_doc_s=args.nlp_budget_doc, budget_total_s=args.nlp_budget_total)
+                    budget_doc_s=args.nlp_budget_doc, budget_total_s=args.nlp_budget_total,
+                    second_pass=args.nlp_second_pass, extra_models=tuple(args.nlp_extra_model))
 
     files = sorted(args.input.glob("*.txt"))
     if not files:

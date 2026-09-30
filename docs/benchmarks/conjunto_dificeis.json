@@ -1,0 +1,268 @@
+{
+  "data/stress/extremo_s3000": {
+    "spans": {
+      "score": 0.8706,
+      "N1": 0.8772,
+      "N2": 0.8673,
+      "tau": 0.0,
+      "spans": 0.7292
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.035,
+      "N1": 1.0369,
+      "N2": 1.0341,
+      "tau": 0.0,
+      "spans": 0.9219,
+      "novas": 25,
+      "normalizadas": 16,
+      "s_por_doc": 0.0
+    }
+  },
+  "data/stress/pesado_s3000": {
+    "spans": {
+      "score": 1.0074,
+      "N1": 0.9635,
+      "N2": 1.0294,
+      "tau": 0.0,
+      "spans": 0.8646
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.07,
+      "N1": 1.08,
+      "N2": 1.065,
+      "tau": 0.0,
+      "spans": 0.974,
+      "novas": 18,
+      "normalizadas": 4,
+      "s_por_doc": 0.0
+    }
+  },
+  "llm_llama_iter": {
+    "spans": {
+      "score": 0.9255,
+      "N1": 1.088,
+      "N2": 0.8442,
+      "tau": 0.0,
+      "spans": 0.899
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0056,
+      "N1": 1.0923,
+      "N2": 0.9623,
+      "tau": 0.0,
+      "spans": 0.9495,
+      "novas": 9,
+      "normalizadas": 1,
+      "s_por_doc": 0.0
+    }
+  },
+  "data/stress/extremo_s7700": {
+    "spans": {
+      "score": 1.0094,
+      "N1": 0.9531,
+      "N2": 1.0375,
+      "tau": 0.0,
+      "spans": 0.8438
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0444,
+      "N1": 1.0204,
+      "N2": 1.0564,
+      "tau": 0.0,
+      "spans": 0.9323,
+      "novas": 14,
+      "normalizadas": 5,
+      "s_por_doc": 0.0
+    }
+  },
+  "data/stress/pesado_s7700": {
+    "spans": {
+      "score": 1.0071,
+      "N1": 0.9478,
+      "N2": 1.0367,
+      "tau": 0.0,
+      "spans": 0.875
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0576,
+      "N1": 1.0655,
+      "N2": 1.0537,
+      "tau": 0.0,
+      "spans": 0.9583,
+      "novas": 12,
+      "normalizadas": 9,
+      "s_por_doc": 0.0
+    }
+  },
+  "llm_iter": {
+    "spans": {
+      "score": 1.021,
+      "N1": 1.0514,
+      "N2": 1.0058,
+      "tau": 0.0,
+      "spans": 0.9262
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0191,
+      "N1": 1.0514,
+      "N2": 1.0029,
+      "tau": 0.0,
+      "spans": 0.9466,
+      "novas": 6,
+      "normalizadas": 1,
+      "s_por_doc": 0.0
+    }
+  },
+  "data/stress/moderado_s3000": {
+    "spans": {
+      "score": 1.0626,
+      "N1": 1.0903,
+      "N2": 1.0487,
+      "tau": 0.0,
+      "spans": 0.9635
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0955,
+      "N1": 1.0997,
+      "N2": 1.0934,
+      "tau": 0.0,
+      "spans": 0.9948,
+      "novas": 6,
+      "normalizadas": 1,
+      "s_por_doc": 0.0
+    }
+  },
+  "data/stress/moderado_s7700": {
+    "spans": {
+      "score": 1.0658,
+      "N1": 1.0608,
+      "N2": 1.0683,
+      "tau": 0.0,
+      "spans": 0.9375
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0927,
+      "N1": 1.0903,
+      "N2": 1.0939,
+      "tau": 0.0,
+      "spans": 0.9844,
+      "novas": 7,
+      "normalizadas": 2,
+      "s_por_doc": 0.0
+    }
+  },
+  "data/stress/extremo_s8800": {
+    "spans": {
+      "score": 0.9717,
+      "N1": 0.9725,
+      "N2": 0.9713,
+      "tau": 0.0,
+      "spans": 0.8333
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0314,
+      "N1": 1.0521,
+      "N2": 1.021,
+      "tau": 0.0,
+      "spans": 0.9375,
+      "novas": 18,
+      "normalizadas": 3,
+      "s_por_doc": 0.02
+    }
+  },
+  "data/stress/pesado_s8800": {
+    "spans": {
+      "score": 0.9779,
+      "N1": 0.9986,
+      "N2": 0.9675,
+      "tau": 0.0,
+      "spans": 0.8594
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0413,
+      "N1": 1.0769,
+      "N2": 1.0235,
+      "tau": 0.0,
+      "spans": 0.9479,
+      "novas": 17,
+      "normalizadas": 2,
+      "s_por_doc": 0.0
+    }
+  },
+  "llm_llama_holdout": {
+    "spans": {
+      "score": 1.0324,
+      "N1": 0.968,
+      "N2": 1.0646,
+      "tau": 0.0,
+      "spans": 0.8768
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0691,
+      "N1": 1.0337,
+      "N2": 1.0867,
+      "tau": 0.0,
+      "spans": 0.9565,
+      "novas": 7,
+      "normalizadas": 4,
+      "s_por_doc": 0.0
+    }
+  },
+  "llm_gaia_holdout": {
+    "spans": {
+      "score": 1.0435,
+      "N1": 1.0002,
+      "N2": 1.0652,
+      "tau": 0.0,
+      "spans": 0.9172
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0834,
+      "N1": 1.0992,
+      "N2": 1.0755,
+      "tau": 0.0,
+      "spans": 0.9724,
+      "novas": 5,
+      "normalizadas": 3,
+      "s_por_doc": 0.0
+    }
+  },
+  "data/stress/moderado_s8800": {
+    "spans": {
+      "score": 1.0619,
+      "N1": 1.0519,
+      "N2": 1.0669,
+      "tau": 0.0,
+      "spans": 0.9375
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0705,
+      "N1": 1.0692,
+      "N2": 1.0711,
+      "tau": 0.0,
+      "spans": 0.9635,
+      "novas": 3,
+      "normalizadas": 2,
+      "s_por_doc": 0.0
+    }
+  },
+  "llm_holdout": {
+    "spans": {
+      "score": 0.9999,
+      "N1": 1.0375,
+      "N2": 0.9811,
+      "tau": 0.0,
+      "spans": 0.9184
+    },
+    "nlp+Qwen3-8B-GGUF:Q4_K_M@hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M": {
+      "score": 1.0821,
+      "N1": 1.0817,
+      "N2": 1.0823,
+      "tau": 0.0,
+      "spans": 0.9796,
+      "novas": 20,
+      "normalizadas": 1,
+      "s_por_doc": 0.0
+    }
+  }
+}

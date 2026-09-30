@@ -2,5 +2,5 @@
 *
 !src/
 !model_manifest.json
-!docker/nlp/Modelfile
+!docker/nlp/
 **/__pycache__/

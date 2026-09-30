@@ -4,7 +4,8 @@
 
 Para cada .txt de --input exige <documento_id>.json em --output com todos os campos, e confere:
 trecho == texto[inicio:fim] (codepoints, arquivo lido com newline=""), tipo e classificação válidos,
-resolucao.id_canonico só em `real` e existente na base, confianca em [0, 1], spans dentro do texto.
+resolucao.id_canonico só em `real` e existente na base, confianca em [0, 1], spans dentro do texto
+e nenhum par de citações com IoU >= 0,5 (a métrica recusa a submissão inteira).
 Só biblioteca padrão. Sai com código 1 se houver qualquer problema.
 """
 
@@ -17,6 +18,11 @@ import sys
 from pathlib import Path
 
 FIELDS = {"inicio", "fim", "trecho", "tipo", "classificacao", "resolucao", "confianca"}
+
+
+def _iou(a: tuple[int, int], b: tuple[int, int]) -> float:
+    inter = max(0, min(a[1], b[1]) - max(a[0], b[0]))
+    return inter / ((a[1] - a[0]) + (b[1] - b[0]) - inter) if inter else 0.0
 
 
 def check(txt_dir: Path, out_dir: Path, db: Path | None) -> list[str]:
@@ -58,6 +64,12 @@ def check(txt_dir: Path, out_dir: Path, db: Path | None) -> list[str]:
                 problems.append(f"{where}: resolucao deveria ser null em {c['classificacao']}")
             if not (isinstance(c["confianca"], (int, float)) and 0 <= c["confianca"] <= 1):
                 problems.append(f"{where}: confianca {c['confianca']!r}")
+        spans = [(c["inicio"], c["fim"]) for c in doc["citacoes"]
+                 if isinstance(c.get("inicio"), int) and isinstance(c.get("fim"), int) and c["inicio"] < c["fim"]]
+        for a in range(len(spans)):
+            for b in range(a + 1, len(spans)):
+                if _iou(spans[a], spans[b]) >= 0.5:
+                    problems.append(f"{txt.stem}: citações {spans[a]} e {spans[b]} com IoU >= 0,5 (a métrica recusa)")
     extra = {p.stem for p in out_dir.glob("*.json")} - {t.stem for t in txt_dir.glob("*.txt")}
     problems += [f"{e}.json: sem .txt correspondente" for e in sorted(extra)]
     print(f"{len(list(txt_dir.glob('*.txt')))} documentos, {total} citações, {len(problems)} problemas")

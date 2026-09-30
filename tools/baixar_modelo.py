@@ -1,5 +1,7 @@
 """Baixa os pesos declarados em model_manifest.json (HF id + revisão fixa) e confere o sha256.
 
+Baixa o modelo principal e os do conjunto; com --so-principal, só o principal (CACA_ENSEMBLE=0).
+
     python3 -m tools.baixar_modelo                 # -> modelos/<arquivo>
     python3 -m tools.baixar_modelo --dest /models
 
@@ -31,14 +33,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dest", type=Path, default=Path("modelos"))
     parser.add_argument("--manifest", type=Path, default=MANIFEST)
+    parser.add_argument("--so-principal", action="store_true", help="só o modelo principal (sem o conjunto)")
     args = parser.parse_args()
 
-    model = json.loads(args.manifest.read_text(encoding="utf-8"))["modelo"]
-    target = args.dest / model["arquivo"]
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    models = [manifest["modelo"]] + ([] if args.so_principal else manifest.get("conjunto", []))
+    return max(download(model, args.dest) for model in models)
+
+
+def download(model: dict, dest: Path) -> int:
+    target = dest / model["arquivo"]
     if target.exists() and sha256(target) == model["sha256"]:
         print(f"{target} já existe e confere com o manifesto")
         return 0
-    args.dest.mkdir(parents=True, exist_ok=True)
+    dest.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(target.suffix + ".part")
     print(f"baixando {model['hf_repo']}@{model['revisao'][:12]} -> {target}")
     with urllib.request.urlopen(model["url"], timeout=60) as response, partial.open("wb") as out:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -50,7 +51,7 @@ def server_env() -> dict[str, str]:
     return os.environ | {
         "OLLAMA_HOST": HOST,                 # só loopback
         "OLLAMA_NUM_PARALLEL": "1",          # um pedido por vez: resultado não depende de lote
-        "OLLAMA_MAX_LOADED_MODELS": "1",
+        "OLLAMA_MAX_LOADED_MODELS": os.environ.get("CACA_MAX_LOADED_MODELS", "2"),  # principal + conjunto
         "OLLAMA_KEEP_ALIVE": "-1",
         "OLLAMA_MODELS": os.environ.get("OLLAMA_MODELS", "/tmp/ollama-models"),
     }
@@ -83,30 +84,64 @@ def find_weights(model: dict) -> Path:
     return found[0]
 
 
-def prepare(manifest: dict) -> tuple[subprocess.Popen, str]:
-    """Confere os pesos, sobe o servidor e registra o modelo. Devolve (processo, nome local)."""
-    model, runtime = manifest["modelo"], manifest["runtime"]
+def report_backend() -> None:
+    """Diz qual acelerador o Ollama achou (CUDA/NVIDIA, ROCm/AMD ou só CPU), pelo log do servidor."""
+    log_path = Path(os.environ.get("CACA_OLLAMA_LOG", "/tmp/ollama.log"))
+    time.sleep(1)
+    found = []
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines() if log_path.exists() else []:
+        if "inference compute" in line:
+            library = re.search(r"\blibrary=(\w+)", line)
+            name = re.search(r'\b(?:name|description)="([^"]*)"', line) or re.search(r"\bname=(\S+)", line)
+            found.append(f"{library.group(1) if library else '?'} {name.group(1) if name else ''}".strip())
+    if not found or all(f.startswith("cpu") for f in found):
+        log("nenhuma GPU visível no contêiner: o modelo roda em CPU (lento); o orçamento de tempo desliga a "
+            "camada se passar de 40 s/doc. NVIDIA: --gpus all; AMD: --device /dev/kfd --device /dev/dri")
+    else:
+        log("acelerador: " + "; ".join(found))
+
+
+def register(model: dict, modelfile: Path, name: str) -> None:
+    """Confere os pesos montados e registra o modelo no servidor."""
     gguf = find_weights(model)
     if os.environ.get("CACA_VERIFY_SHA", "1") != "0":
         start = time.monotonic()
         if (got := sha256(gguf)) != model["sha256"]:
-            raise LauncherError(f"sha256 dos pesos ({got[:12]}…) difere do manifesto ({model['sha256'][:12]}…)")
+            raise LauncherError(f"sha256 de {gguf.name} ({got[:12]}…) difere do manifesto ({model['sha256'][:12]}…)")
         log(f"pesos conferidos: {model['hf_repo']}@{model['revisao'][:12]} ({time.monotonic() - start:.0f} s)")
+    with tempfile.NamedTemporaryFile("w", suffix=".Modelfile", delete=False, encoding="utf-8") as tmp:
+        tmp.write(f"FROM {gguf}\n{modelfile.read_text(encoding='utf-8')}")
+    created = subprocess.run(["ollama", "create", name, "-f", tmp.name], env=server_env(),
+                             capture_output=True, text=True, timeout=900)
+    if created.returncode != 0:
+        raise LauncherError(f"ollama create {name} falhou: {created.stderr.strip()[-300:]}")
+
+
+def prepare(manifest: dict) -> tuple[subprocess.Popen, str, list[str]]:
+    """Sobe o servidor e registra o modelo principal e os do conjunto. Devolve (processo, principal, extras).
+
+    Sem o principal, erro (a execução segue só com as regras). Sem um extra, segue sem ele.
+    """
+    model, runtime = manifest["modelo"], manifest["runtime"]
+    find_weights(model)  # falha cedo, antes de subir o servidor
     process = subprocess.Popen(["ollama", "serve"], env=server_env(), stdout=subprocess.DEVNULL,
                                stderr=open(os.environ.get("CACA_OLLAMA_LOG", "/tmp/ollama.log"), "w"))
     try:
         wait_server(process)
-        modelfile = (ROOT / runtime["modelfile"]).read_text(encoding="utf-8")
-        with tempfile.NamedTemporaryFile("w", suffix=".Modelfile", delete=False, encoding="utf-8") as tmp:
-            tmp.write(f"FROM {gguf}\n{modelfile}")
-        created = subprocess.run(["ollama", "create", runtime["nome_local"], "-f", tmp.name], env=server_env(),
-                                 capture_output=True, text=True, timeout=900)
-        if created.returncode != 0:
-            raise LauncherError(f"ollama create falhou: {created.stderr.strip()[-300:]}")
+        report_backend()
+        register(model, ROOT / runtime["modelfile"], runtime["nome_local"])
     except (LauncherError, OSError, subprocess.SubprocessError) as error:
         process.terminate()
         raise LauncherError(str(error)) from error
-    return process, runtime["nome_local"]
+    extras = []
+    if os.environ.get("CACA_ENSEMBLE", "1") != "0":
+        for extra in manifest.get("conjunto", []):
+            try:
+                register(extra, ROOT / extra["modelfile"], extra["nome_local"])
+                extras.append(extra["nome_local"])
+            except (LauncherError, OSError, subprocess.SubprocessError) as error:
+                log(f"modelo do conjunto {extra['hf_repo']} indisponível ({error}): seguindo sem ele")
+    return process, runtime["nome_local"], extras
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,13 +150,14 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        process, name = prepare(manifest)
+        process, name, extras = prepare(manifest)
     except (LauncherError, OSError, ValueError, KeyError) as error:
         log(f"{error}: seguindo só com as regras")
         return pipeline(argv)
-    log(f"camada de NLP ligada com {name}")
+    log(f"camada de NLP ligada com {name}" + (f" + {', '.join(extras)} (conjunto)" if extras else ""))
     try:
-        return pipeline(argv + ["--nlp", "--nlp-model", name, "--nlp-url", URL])
+        return pipeline(argv + ["--nlp", "--nlp-model", name, "--nlp-url", URL]
+                        + [arg for extra in extras for arg in ("--nlp-extra-model", extra)])
     finally:
         process.terminate()
         try:

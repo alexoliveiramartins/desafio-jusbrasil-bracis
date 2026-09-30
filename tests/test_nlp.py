@@ -97,10 +97,30 @@ class EvidenceTest(unittest.TestCase):
         self.assertFalse(_class_evidence("REsp", "apelo nobre"))
         self.assertFalse(_class_evidence("RE", "Reclamação 1"))
 
+    def test_number_words_blockers_and_unknown_qualifiers(self):
+        from src.nlp import _number_after_citation_words as ok
+        self.assertTrue(ok("Agravo Regimental no Reclamação Constitucional n. 64.895 – SP", "64895"))  # "Constitucional"
+        self.assertTrue(ok("Recurso Especial Cível\nNo 1 925 856/SP. – STJ", "1925856"))                # "Cível"
+        self.assertFalse(ok("O STJ, em 2025, editou a Resolução nº 188", "188"))
+        self.assertFalse(ok("Recurso ordinário nº de ordem 295", "295"))
+        self.assertFalse(ok("fls. 580/845", "580845"))
+
+    def test_tema_and_nicknamed_laws(self):
+        self.assertEqual(canonical({"tipo": "tema", "numero": "591"}, "tema de repercussão geral nº 591"),
+                         ("temas", ["Tema"]))
+        self.assertIsNone(canonical({"tipo": "tema", "numero": "8112"}, "Incidem as regras da Lei nº 8.112/90"))
+        self.assertEqual(canonical({"tipo": "artigo", "artigo": "477"}, "art 477 do diploma consolidado"),
+                         ("artigos", ["art. 477 da CLT"]))
+        self.assertEqual(canonical({"tipo": "artigo", "artigo": "128", "diploma": "OUTRA", "lei": "8.245/1991"},
+                                   "art.\n128 da Lei do Inquilinato"), ("artigos", ["art. 128 da Lei nº 8.245/1991"]))
+        # O modelo diz que a "Lei do Inquilinato" é o CDC (que está na base): sem evidência do CDC, não decide.
+        self.assertIsNone(canonical({"tipo": "artigo", "artigo": "14", "diploma": "OUTRA", "lei": "8.078/1990"},
+                                    "art. 14 da Lei do Inquilinato"))
+
     def test_article_ocr(self):
         family, forms = canonical(item("art. 75daLei CompIemenar no 64/1990", "artigo", artigo="75"),
                                   "art. 75daLei CompIemenar no 64/1990")
-        self.assertEqual(forms, ["art. 75 da Lei nº 64/1990"])  # lei lida do trecho, colada em "da"
+        self.assertEqual(forms, ["art. 75 da Lei Complementar nº 64/1990"])  # "CompIemenar": evidência com OCR
         family, forms = canonical(item("art. l da Lei Complementar nº 64/19g0", "artigo", artigo="1",
                                        diploma="LC64/1990"), "art. l da Lei Complementar nº 64/19g0")
         self.assertEqual(forms, ["art. 1 da Lei Complementar nº 64/1990"])
@@ -141,9 +161,9 @@ class LayerTest(unittest.TestCase):
 
     def test_new_citation_from_model(self):
         # Forma que as regras não conhecem; o modelo acha e a base resolve.
-        text = "Veja-se o decidido pelo STJ no feito tombado sob 1741784, oriundo do Paraná, em caso idêntico."
+        text = "Veja-se o decidido pelo STJ no feito nº 1741784, oriundo do Paraná, em caso idêntico."
         spans_only = process_text("t", text, self.index)["citacoes"]
-        out = self.run_layer(text, [item("STJ no feito tombado sob 1741784, oriundo do Paraná", classe="REsp",
+        out = self.run_layer(text, [item("STJ no feito nº 1741784, oriundo do Paraná", classe="REsp",
                                          numero="1741784", uf="PR", tribunal="STJ")])
         self.assertEqual(spans_only, [])
         self.assertEqual([(c["classificacao"], (c["resolucao"] or {}).get("id_canonico")) for c in out],
@@ -166,6 +186,40 @@ class LayerTest(unittest.TestCase):
         text = "Texto longo da peça, com prosa suficiente para não ser cabeçalho, e mais texto aqui.\n12   Autos nº 0872233-87.2010.7.76.6271\n"
         out = self.run_layer(text, [item("Autos nº 0872233-87.2010.7.76.6271", numero="08722338720107766271")])
         self.assertEqual(out, [])
+
+    def test_number_must_follow_citation_words(self):
+        # "Resolução nº 188" e "nº de ordem 295" têm número e tribunal/classe por perto, mas não são citação.
+        text = "O STJ, em 2025, editou a Resolução nº 188. O Recurso ordinário nº de ordem 295 foi juntado."
+        out = self.run_layer(text, [item("O STJ, em 2025, editou a Resolução nº 188", tribunal="STJ", numero="188"),
+                                    item("Recurso ordinário nº de ordem 295", classe="RO", numero="295")])
+        self.assertEqual(out, [])
+
+    def test_two_citations_in_one_model_item_do_not_share_numbers(self):
+        # O modelo junta "Súmula 3 e Súmula 211": a Súmula 3 (inexistente) não pode herdar o 211 da vizinha.
+        text = "Vide STJ - Súmula 3 e Súmula 211 do Egrégio STJ, no ponto."
+        out = self.run_layer(text, [item("Vide STJ - Súmula 3 e Súmula 211 do Egrégio STJ", "sumula", numero="211",
+                                         tribunal="STJ")])
+        by_text = {c["trecho"]: c["classificacao"] for c in out}
+        self.assertNotEqual(by_text.get("STJ - Súmula 3"), "real")
+
+    def test_second_pass_rereads_uncovered_sentences(self):
+        from src.nlp import uncovered_windows
+        text = ("EGRÉGIO TRIBUNAL\n\nAutos nº 1051967-37.2016.3.02.7661\n\n"
+                "A matéria foi decidida no REsp 1.741.784/PR, sem ressalvas. Também no feito tombado sob 1.234.567, "
+                "oriundo do Paraná. Em 12/03/2020, com valor de R$ 155.135,93 e fls. 234/567, nada mudou.")
+        rules = process_text("t", text, self.index)["citacoes"]
+        windows = uncovered_windows(text, rules, 70)
+        self.assertEqual(len(windows), 1)
+        self.assertIn("tombado sob 1.234.567", windows[0])  # número sem citação que o cubra
+        self.assertNotIn("R$", windows[0])                   # data, valor, folhas e autos não são pista
+
+    def test_ensemble_disagreement_keeps_rules(self):
+        # Dois modelos leem o mesmo número de dois jeitos que levam a registros diferentes: nada muda.
+        text = "Cumpre destacar o REsp 1.741.785/PR, de clareza solar."
+        layer = NLPLayer(FakeClient([item("REsp 1.741.785/PR", classe="REsp", numero="1741785", uf="PR")]),
+                         extra_clients=(FakeClient([item("REsp 1.741.785/PR", classe="REsp", numero="1741785")]),))
+        out = process_text("t", text, self.index, debug=True, nlp=layer)["citacoes"]
+        self.assertEqual([c["classificacao"] for c in out], ["inventada"])
 
     def test_recall_off(self):
         text = "Veja-se o decidido no apelo nobre de número 1741784, oriundo do Paraná, em caso idêntico."
@@ -212,7 +266,29 @@ class ComplianceTest(unittest.TestCase):
         finally:
             nlp.time.monotonic = original
         self.assertTrue(layer.disabled)
-        self.assertEqual(layer.docs, 3)  # depois de desligada, não consulta mais o modelo
+        self.assertEqual(layer.docs, 4)  # 1º doc fora da média + 3 de aquecimento; depois, não consulta mais
+
+    def test_cold_start_does_not_turn_layer_off(self):
+        """Partida a frio lenta (carregar os modelos na GPU) não desliga a camada (execução de 29/09)."""
+        import src.nlp as nlp
+        clock = [0.0]
+        durations = iter([101.6, 20.1, 16.5, 21.0, 19.0, 22.0])
+
+        class ColdStart(SlowClient):
+            def chat_json(self, system, user, schema):
+                self.clock[0] += next(durations)
+                return FakeClient.chat_json(self, system, user, schema)
+
+        original = nlp.time.monotonic
+        nlp.time.monotonic = lambda: clock[0]
+        try:
+            layer = NLPLayer(ColdStart([], clock), budget_doc_s=40.0, warmup_docs=3)
+            for _ in range(6):
+                layer.refine("texto sem citação", [], self.index)
+        finally:
+            nlp.time.monotonic = original
+        self.assertFalse(layer.disabled)
+        self.assertEqual(layer.docs, 6)
 
     def test_only_local_model_server(self):
         from src.nlp import OllamaClient, from_args
@@ -232,3 +308,14 @@ class ComplianceTest(unittest.TestCase):
                 del os.environ["CACA_MODEL_DIR"]
             self.assertEqual(code, 0)
             self.assertEqual(len(list(Path(out).glob("*.json"))), 26)
+
+    def test_image_ships_every_modelfile(self):
+        """Cada Modelfile do manifesto entra na imagem (senão o modelo do conjunto some sem erro)."""
+        import json
+        import re
+        manifest = json.loads(Path("model_manifest.json").read_text(encoding="utf-8"))
+        copied = re.findall(r"^COPY\s+(?!--)(\S+)\s", Path("Dockerfile").read_text(encoding="utf-8"), re.M)
+        for modelfile in [manifest["runtime"]["modelfile"]] + [m["modelfile"] for m in manifest["conjunto"]]:
+            self.assertTrue(Path(modelfile).is_file(), modelfile)
+            self.assertTrue(any(modelfile == c or (c.endswith("/") and modelfile.startswith(c)) for c in copied),
+                            f"{modelfile} fora dos COPY do Dockerfile")

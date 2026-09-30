@@ -41,7 +41,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .classify import INCOMPLETA, INVENTADA, REAL, CanonicalIndex, Resolution, resolve
-from .normalize import OCR_DIGITS, UFS, class_code, diploma_key, name_tokens, number_group_spans, number_groups
+from .normalize import OCR_DIGITS, UFS, class_code, diploma_key, fold, name_tokens, number_group_spans, number_groups
 from .spans import _ART_CUE, _ENUM, _PREPS, _SUMULA_CUE, _longest_diploma, clean, courts_in, to_original
 
 DEFAULT_MODEL = "hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M"
@@ -267,6 +267,7 @@ def _name_in_span(relator: str, span: str) -> bool:
     tokens = name_tokens(relator)
     if not tokens:
         return False
+    span = clean(_nfc(span)[0])[0]  # "Gil-\nmar" -> "Gilmar"; acento decomposto, invisíveis
     span_tokens = [skeleton(t)[0] for t in re.findall(r"[^\W\d_]+", span)]
     for token in tokens:
         sk = skeleton(token)[0]
@@ -320,6 +321,57 @@ def _evidence_length(stems: list[str], span: str) -> int:
     return best
 
 
+# Palavras que podem vir logo antes do número de um processo (classe, recurso, tribunal), além dos radicais
+# de CLASS_EVIDENCE; marcadores e conectivos entre elas e o número são ignorados.
+_CITATION_WORDS = ["agravo", "agint", "agrg", "agr", "edcl", "eds", "embargos", "declaracao", "divergencia", "interno",
+                   "regimental", "recurso", "corpus", "especial", "extraordinario", "eleitoral", "revista",
+                   "instrumento", "seguranca", "estrito", "ordinario", "rescisoria", "reclamacao", "apelacao",
+                   "criminal", "liminar", "sentenca", "processo", "proc", "feito", "stf", "stj", "tst", "tse", "stm"]
+_MARKERS = {"n", "no", "nº", "n°", "nr", "nro", "num", "numero", "número", "de", "do", "da", "dos", "das", "na",
+            "nos", "nas", "em", "e"}
+
+
+# Palavras que, logo antes de um número, dizem que ele não é de processo.
+_BLOCKERS = {"ordem", "resolucao", "portaria", "ato", "instrucao", "provimento", "decreto", "pauta", "folha",
+             "folhas", "fls", "fl", "pagina", "paginas", "protocolo", "autos", "sessao", "edital", "oficio", "item",
+             "lei", "emenda", "rs", "reais", "valor", "cpf", "cnpj", "oab", "cep", "matricula", "inscricao"}
+
+
+def _number_after_citation_words(span: str, digits: str) -> bool:
+    """O número vem depois de classe/recurso/tribunal ("REsp nº 1.234", "Reclamação Constitucional n. 64.895")
+    e não de outra coisa ("Resolução nº 188", "nº de ordem 295")? Volta pelas palavras antes do número: palavra de
+    bloqueio recusa; vocabulário de citação aceita; até 3 palavras desconhecidas ("Cível") no caminho.
+    CNJ completo se identifica sozinho."""
+    groups = [g for g in number_group_spans(span) if not (len(g[0]) == 4 and g[0][:2] in ("19", "20"))]
+    if any(len(g[0]) >= 18 for g in groups):
+        return True
+    target = [g for g in groups if digits and g[0].lstrip("0") == digits.lstrip("0")] or (groups if len(groups) == 1 else [])
+    if not target:
+        return False
+    stems = _CITATION_WORDS + [stem for stems in CLASS_EVIDENCE.values() for stem in stems]
+    unknown = 0
+    for token in reversed(re.findall(r"[^\W\d_]+", span[:target[0][1]])):
+        folded = fold(token)
+        if folded in _MARKERS:
+            continue
+        if folded in _BLOCKERS:
+            return False
+        token_sk = skeleton(token)[0]
+        if _evidence_length(stems, token) > 0 or any(len(stem) >= 4 and token_sk.endswith(skeleton(stem)[0])
+                                                      for stem in stems):  # "uoREsp"
+            return True
+        unknown += 1
+        if unknown > 3:
+            return False
+    return False
+
+
+def _best_evidence_diploma(span: str) -> str | None:
+    """O único diploma da base com evidência no trecho, se houver só um."""
+    found = [d for d in DIPLOMA_TEXT if _diploma_evidence(d, span)]
+    return found[0] if len(found) == 1 else None
+
+
 def _best_evidence_class(span: str) -> str | None:
     """Classe com o radical mais longo que aparece no trecho ("recurso em habeas" > "habeas"); empate = None."""
     scored = sorted(((_evidence_length(stems, span), cls) for cls, stems in CLASS_EVIDENCE.items()), reverse=True)
@@ -369,6 +421,31 @@ def _is_year(group: str) -> bool:
     return len(group) == 4 and group[:2] in ("19", "20")
 
 
+_TEMA_CUE = re.compile(r"(?<![^\W\d_])t[eéc]m[aã]s?(?![^\W\d_])", re.IGNORECASE)
+
+
+_SUMULA_SK = "5nmn1a"  # esqueleto de "súmula"
+
+
+def _sumula_cue_end(plain: str) -> int | None:
+    """Fim da pista de súmula no trecho: "Súmula", "Súm.", "verbete", "enunciado", "SV", ou a palavra "súmula"
+    corrompida por OCR ("Súmuula", "Súmla", "5umulla", "Suu\nmla", "aSúm.")."""
+    if cue := _SUMULA_CUE.search(plain) or re.search(r"(?-i:\bSV\b)", plain):
+        return cue.end()
+    words = list(re.finditer(r"[^\W\d_]+", plain))
+    for i, w in enumerate(words):
+        candidates = [(w.group(), w.end())]
+        if i + 1 < len(words) and re.fullmatch(r"[\s\-\u00ad]*", plain[w.end():words[i + 1].start()]):
+            candidates.append((w.group() + words[i + 1].group(), words[i + 1].end()))  # "Suu\nmla"
+        for text, end in candidates:
+            sk = skeleton(text)[0]
+            if difflib.SequenceMatcher(None, sk, _SUMULA_SK).ratio() >= 0.75 and len(sk) <= 9:
+                return end
+            if sk.endswith("5nm") and plain[end:end + 1] == ".":  # "aSúm."
+                return end + 1
+    return None
+
+
 def _tribunal(item: dict, span: str) -> str | None:
     """Tribunal escrito no trecho; o do modelo só vale se o trecho fala de um tribunal por apelido."""
     courts = courts_in(span)
@@ -400,7 +477,14 @@ def canonical(item: dict, span: str, context: str | None = None) -> tuple[str, l
     tipo = item.get("tipo")
     evidence = context or span
     if tipo == "tema":
-        return ("temas", ["Tema"]) if _digits(item.get("numero")) else None
+        # "Tema 1.046 da repercussão geral": a palavra "tema" e o número logo depois dela, no próprio trecho
+        # (o modelo às vezes chama de tema uma lei ou resolução: "Lei nº 8.112/90", "Resolução nº 639").
+        digits = _digits(item.get("numero"))
+        plain = clean(_nfc(span)[0])[0]
+        cue = _TEMA_CUE.search(plain)
+        if not digits or not cue or not digits_in_span(digits, plain[cue.end():cue.end() + 50]):
+            return None
+        return "temas", ["Tema"]
     if tipo == "processo":
         digits = _digits(item.get("numero"))
         if 14 <= len(digits) < 20:
@@ -414,12 +498,12 @@ def canonical(item: dict, span: str, context: str | None = None) -> tuple[str, l
             digits = cnj[0] if len(cnj) == 1 else short[0] if not cnj and len(short) == 1 else ""
         if len(digits) < 3:
             return None
-        tribunal = _tribunal(item, span)
+        tribunal = _tribunal(item, evidence)
         # Classe: vale a leitura que tem evidência no trecho (do modelo ou das regras); sem evidência
         # para nenhuma, as duas precisam levar ao mesmo registro.
-        readings = list(dict.fromkeys(c for c in (item.get("classe"), class_code(span)) if c))
-        classes = [c for c in readings if _class_evidence(c, span)]
-        if not classes and (by_evidence := _best_evidence_class(span)):
+        readings = list(dict.fromkeys(c for c in (item.get("classe"), class_code(evidence)) if c))
+        classes = [c for c in readings if _class_evidence(c, evidence)]
+        if not classes and (by_evidence := _best_evidence_class(evidence)):
             classes = [by_evidence]  # nem o modelo nem as regras leram a classe que o trecho mostra
         classes = classes or readings or [None]
         if tribunal == "TST" or set(classes) & TST_CLASSES:
@@ -436,13 +520,24 @@ def canonical(item: dict, span: str, context: str | None = None) -> tuple[str, l
                  + (f" ({tribunal})" if tribunal else "") for classe in classes]
         return "processos", forms
     if tipo == "sumula":
+        # Pista de súmula no trecho e o número logo depois dela (o modelo às vezes chama de súmula uma
+        # "Resolução nº 866").
         digits = _digits(item.get("numero"))
-        if not digits or not digits_in_span(digits, span):
+        plain = clean(_nfc(span)[0])[0]  # "5Ãºmula" (mojibake) e acento decomposto viram "5úmula"/"Súmula"
+        cue_end = _sumula_cue_end(plain)
+        if cue_end is None:
             return None
-        if item.get("vinculante") or re.search(r"(?-i:\bSV\b)", span) or _has_evidence(["vinculante"], span):
+        window = plain[cue_end:cue_end + 50]
+        if not digits_in_span(digits, window):
+            # O modelo leu mal o número ("q79"): vale o primeiro número depois da pista, lido do texto.
+            groups = [g for g in number_groups(window) if len(g) <= 4]
+            digits = groups[0] if groups else ""
+        if not digits:
+            return None
+        if item.get("vinculante") or re.search(r"(?-i:\bSV\b)", evidence) or _has_evidence(["vinculante"], evidence):
             return "sumulas", [f"Súmula Vinculante {int(digits)}"]
-        courts = courts_in(span)
-        tribunal = courts[-1] if courts else _tribunal(item, span)
+        courts = courts_in(evidence)
+        tribunal = courts[-1] if courts else _tribunal(item, evidence)
         return ("sumulas", [f"Súmula {int(digits)} do {tribunal}"]) if tribunal else None
     if tipo == "artigo":
         digits = _digits(item.get("artigo"))
@@ -450,22 +545,31 @@ def canonical(item: dict, span: str, context: str | None = None) -> tuple[str, l
         one = digits == "1" and re.search(r"\bart(?:igo)?\.?\s*[lI|](?![\w|])", span, re.I)  # "art. l" = art. 1
         if not digits or not (digits_in_span(digits, span) or digits_in_span(digits, unordinal) or one):
             return None
-        llm_diploma = item.get("diploma") if _diploma_evidence(item.get("diploma"), span) else None
-        diplomas = list(dict.fromkeys(d for d in (llm_diploma, diploma_key(span)) if d in DIPLOMA_TEXT))
+        llm_diploma = item.get("diploma") if _diploma_evidence(item.get("diploma"), evidence) else None
+        diplomas = list(dict.fromkeys(d for d in (llm_diploma, diploma_key(evidence)) if d in DIPLOMA_TEXT))
+        if not diplomas and (by_evidence := _best_evidence_diploma(evidence)):
+            diplomas = [by_evidence]  # "diploma consolidado" -> CLT
         if diplomas:
             return "artigos", [f"art. {int(digits)} {DIPLOMA_TEXT[d]}" for d in diplomas]
         # Lei citada pelo número: o número vem do trecho (com OCR), não do modelo, que confunde as leis.
-        if m := _LAW_IN_SPAN.search(span):
+        if m := _LAW_IN_SPAN.search(evidence):
             number, year = m.group(1).translate(OCR_DIGITS), m.group(2).translate(OCR_DIGITS)
             number, year = re.sub(r"\D", "", number), re.sub(r"\D", "", year)
             if number and year:
                 return "artigos", [f"art. {int(digits)} da Lei nº {_fmt_number(number)}/{year}"]
+        # Lei por apelido ("Lei do Inquilinato"): vale o número que o modelo conhece, mas se ele cair num diploma
+        # da base, o trecho tem de mostrar esse diploma (o modelo não transforma inventada em real).
+        lei = str(item.get("lei") or "")
+        if re.search(r"\d", lei) and re.search(r"\b(?:lei|estatuto|c[oó]digo|diploma)\b", evidence, re.I):
+            key = diploma_key(f"Lei nº {lei}")
+            if key and (key not in DIPLOMA_TEXT or _diploma_evidence(key, evidence)):
+                return "artigos", [f"art. {int(digits)} da Lei nº {lei}"]
         return None
     if tipo == "julgado":
         ano, relator = item.get("ano"), item.get("relator")
         if not ano or not relator or not digits_in_span(str(ano), span) or not _name_in_span(relator, span):
             return None
-        tribunal = _tribunal(item, span)
+        tribunal = _tribunal(item, evidence)
         classe = class_code(span.split(str(ano))[0])
         if not tribunal:
             return None
@@ -489,24 +593,33 @@ def resolve_forms(family: str, forms: list[str], citation: dict, index: Canonica
 class NLPLayer:
     """Revisão das regras pelo modelo, dentro de um orçamento de tempo.
 
-    O envelope oficial é média <= 60 s/documento e 4 h no total. Se a média passar de
-    `budget_doc_s` (depois de `warmup_docs` documentos) ou o total passar de `budget_total_s`,
-    a camada se desliga e o restante sai só com as regras (ex.: contêiner sem GPU, modelo em CPU).
+    O envelope oficial é média <= 60 s/documento e 4 h no total. Se a média por documento (sem o
+    primeiro, que inclui carregar os modelos na GPU) passar de `budget_doc_s` depois de `warmup_docs`
+    documentos, ou o total passar de `budget_total_s`, a camada se desliga e o restante sai só com as
+    regras (ex.: contêiner sem GPU, modelo em CPU).
     """
 
     def __init__(self, client: OllamaClient, *, normalize: bool = True, recall: bool = True,
                  chunk_chars: int = 3000, workers: int = 1, budget_doc_s: float = 40.0,
-                 budget_total_s: float = 3 * 3600.0, warmup_docs: int = 3):
+                 budget_total_s: float = 3 * 3600.0, warmup_docs: int = 3, second_pass: bool = False,
+                 extra_clients: tuple[OllamaClient, ...] = (), max_windows: int = 8):
         self.client, self.normalize, self.recall = client, normalize, recall
         self.chunk_chars, self.workers = chunk_chars, workers
+        # Segunda passada: releitura só das frases com pistas que ninguém cobriu. Modelos extras: conjunto
+        # (união para citações novas; normalização só se todos os modelos levarem ao mesmo registro).
+        self.second_pass, self.extra_clients, self.max_windows = second_pass, tuple(extra_clients), max_windows
         self.budget_doc_s, self.budget_total_s, self.warmup_docs = budget_doc_s, budget_total_s, warmup_docs
-        self.spent_s, self.docs, self.disabled = 0.0, 0, False
+        self.spent_s, self.docs, self.disabled, self.first_s = 0.0, 0, False, 0.0
 
     def _charge(self, seconds: float) -> None:
         self.spent_s += seconds
         self.docs += 1
-        average = self.spent_s / self.docs
-        if (self.docs >= self.warmup_docs and average > self.budget_doc_s) or self.spent_s > self.budget_total_s:
+        if self.docs == 1:
+            # O 1º documento inclui carregar os modelos na GPU (partida a frio, 100 s ou mais num disco
+            # lento): conta para o total, mas fica fora da média, senão desliga a camada no começo.
+            self.first_s = seconds
+        average = (self.spent_s - self.first_s) / (self.docs - 1) if self.docs > 1 else 0.0
+        if (self.docs > self.warmup_docs and average > self.budget_doc_s) or self.spent_s > self.budget_total_s:
             self.disabled = True
             print(f"[nlp] orçamento de tempo excedido ({self.docs} docs, média {average:.1f} s, total "
                   f"{self.spent_s:.0f} s): o restante sai só com as regras", file=sys.stderr)
@@ -526,13 +639,14 @@ class NLPLayer:
             start = end
         return out
 
-    def read(self, content: str) -> list[tuple[int, dict]]:
+    def read(self, content: str, client: OllamaClient | None = None) -> list[tuple[int, dict]]:
         """(offset do trecho, citação do modelo) para toda a peça."""
         items = []
         chunks = self.chunks(content)
+        client = client or self.client
 
         def call(chunk: tuple[int, str]):
-            data = self.client.chat_json(SYSTEM, PROMPT.format(texto=chunk[1]), SCHEMA)
+            data = client.chat_json(SYSTEM, PROMPT.format(texto=chunk[1]), SCHEMA)
             return chunk[0], (data or {}).get("citacoes") or []
 
         if self.workers > 1 and len(chunks) > 1:
@@ -550,18 +664,33 @@ class NLPLayer:
         """Revisa as citações das regras (dicts com inicio, fim, trecho, familia, resolution) e acrescenta novas."""
         if self.disabled:
             return citations
-        start = time.monotonic()
-        items = self.read(content)
-        self._charge(time.monotonic() - start)
-        if not items:
-            return citations
-        text_sk, text_index = skeleton(content)
-        header_end = _header_end(content)
-        own_numbers = {_digits(m.group()) for m in re.finditer(r"[\d.\-]{15,}", content[:header_end])}
+        clock = time.monotonic()
+        items = [it for client in (self.client, *self.extra_clients) for it in self.read(content, client)]
+        state = _DocState(content)
         added: list[dict] = []
+        self._absorb(items, citations, added, state, index)
+        if self.second_pass and self.recall:
+            windows = uncovered_windows(content, citations + added, state.header_end, self.max_windows)
+            if windows:
+                for client in (self.client, *self.extra_clients):
+                    data = client.chat_json(SYSTEM, PROMPT.format(texto="\n\n".join(windows)), SCHEMA)
+                    second = [(0, c) for c in (data or {}).get("citacoes") or []
+                              if isinstance(c, dict) and isinstance(c.get("trecho"), str)]
+                    self._absorb(second, citations, added, state, index)
+        self._charge(time.monotonic() - clock)
+        for c in citations + added:
+            if c.pop("_conflito", False):
+                c["resolution"] = c.pop("_original")  # modelos levaram a registros diferentes: fica o das regras
+            c.pop("_original", None)
+            c.pop("_propostas", None)
+        return sorted(citations + added, key=lambda c: c["inicio"])
+
+    def _absorb(self, items: list[tuple[int, dict]], citations: list[dict], added: list[dict], state: "_DocState",
+                index: CanonicalIndex) -> None:
+        content = state.content
         for _, item in items:
             # Todas as ocorrências no documento: a mesma citação repetida é anotada em cada lugar.
-            for start, end in align(text_sk, text_index, item["trecho"]):
+            for start, end in align(state.text_sk, state.text_index, item["trecho"]):
                 # Mesma citação só com sobreposição substancial: um span longo das regras que só encosta
                 # na citação do modelo ("… STF" + "STF, 2026, EDSON FACHIN") não a esconde.
                 overlap = [c for c in citations + added if _same_citation((start, end), (c["inicio"], c["fim"]))]
@@ -584,12 +713,13 @@ class NLPLayer:
                     start, end = trim_article(content, start, end, _digits(item.get("artigo")))
                 elif item.get("tipo") == "sumula":
                     start, end = trim_sumula(content, start, end, _digits(item.get("numero")))
-                if not self._acceptable(content, start, end, item, header_end, own_numbers):
+                if any(_same_citation((start, end), (c["inicio"], c["fim"])) for c in citations + added):
+                    continue  # depois de aparada, é uma citação que já existe
+                if not self._acceptable(content, start, end, item, state.header_end, state.own_numbers):
                     continue
                 new = self._classify_new(content, start, end, item, index)
                 if new:
                     added.append(new)
-        return sorted(citations + added, key=lambda c: c["inicio"])
 
     def _shrink_overlong(self, citation: dict, start: int, end: int, content: str, index: CanonicalIndex) -> None:
         """Span das regras muito maior que a citação que o modelo alinhou dentro dele (um parágrafo inteiro
@@ -605,7 +735,7 @@ class NLPLayer:
         citation["resolution"] = resolution
 
     def _renormalize(self, citation: dict, item: dict, index: CanonicalIndex, evidence: str | None = None) -> None:
-        resolution: Resolution = citation["resolution"]
+        resolution: Resolution = citation.get("_original") or citation["resolution"]
         if resolution.classificacao == REAL:
             return  # o que as regras resolveram não muda
         span = citation["trecho"]
@@ -619,11 +749,19 @@ class NLPLayer:
         if new is None:
             return  # modelo e trecho divergem
         if new.classificacao == REAL:
-            citation["resolution"] = Resolution(REAL, new.id_canonico, NLP_CONFIDENCE["real_nlp"], "real_nlp")
+            proposal = Resolution(REAL, new.id_canonico, NLP_CONFIDENCE["real_nlp"], "real_nlp")
         elif (new.classificacao == INVENTADA and resolution.regra.startswith("incompleta_sem_numero")
               and family != "julgados_descritivos"):
             # As regras não acharam o número; o modelo achou e a base não tem.
-            citation["resolution"] = Resolution(INVENTADA, None, NLP_CONFIDENCE["inventada_nlp"], "inventada_nlp")
+            proposal = Resolution(INVENTADA, None, NLP_CONFIDENCE["inventada_nlp"], "inventada_nlp")
+        else:
+            return
+        proposals = citation.setdefault("_propostas", set())
+        proposals.add((proposal.classificacao, proposal.id_canonico))
+        citation.setdefault("_original", resolution)
+        if len(proposals) > 1:
+            citation["_conflito"] = True  # leituras levaram a registros diferentes: não decide
+        citation["resolution"] = proposal
 
     def _acceptable(self, content: str, start: int, end: int, item: dict, header_end: int,
                     own_numbers: set[str]) -> bool:
@@ -639,11 +777,8 @@ class NLPLayer:
             return False  # "Autos nº …": número do próprio processo (distrator do PDF), mesmo com ruído na linha
         if item.get("tipo") == "processo" and digits and any(digits in n or n in digits for n in own_numbers if n):
             return False  # número dos autos do próprio documento
-        if item.get("tipo") == "processo" and not (class_code(span) or courts_in(span) or _GLUED_COURT.search(span)
-                                                   or _class_evidence(item.get("classe"), span)
-                                                   or _best_evidence_class(span)
-                                                   or any(len(g) >= 18 for g in number_groups(span))):
-            return False  # número solto ("fls. 580/845" com OCR) não é processo
+        if item.get("tipo") == "processo" and not _number_after_citation_words(span, _digits(item.get("numero"))):
+            return False  # número solto ("fls. 580/845", "Resolução nº 188", "nº de ordem 295") não é processo
         if canonical(item, span) is not None:
             return True
         return item.get("tipo") == "julgado" and _plausible_julgado(item, span)
@@ -813,6 +948,53 @@ def _same_citation(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return shared > 0 and shared >= 0.5 * min(a[1] - a[0], b[1] - b[0])
 
 
+class _DocState:
+    """O que a revisão de um documento reaproveita entre passadas."""
+
+    def __init__(self, content: str):
+        self.content = content
+        self.text_sk, self.text_index = skeleton(content)
+        self.header_end = _header_end(content)
+        self.own_numbers = {_digits(m.group()) for m in re.finditer(r"[\d.\-]{15,}", content[:self.header_end])}
+
+
+_NOT_CITATION_BEFORE = re.compile(r"(?:R\$|fls?\.?|OAB|CPF|CNPJ|CEP|protocolo|autos)[\s:/nº°.]*$", re.IGNORECASE)
+_YEAR_NEAR_COURT = re.compile(r"(?:19|20)\d\d")
+
+
+def uncovered_windows(content: str, citations: list[dict], header_end: int, limit: int = 8) -> list[str]:
+    """Frases com pistas de citação que nenhuma citação cobre: número de 3+ dígitos (fora ano, data, valor,
+    folhas e cabeçalho), "art."/"artigo", "Súmula", ou sigla de tribunal com ano por perto."""
+    covered = [(c["inicio"], c["fim"]) for c in citations]
+
+    def free(a: int, b: int) -> bool:
+        return a >= header_end and not any(x < b and a < y for x, y in covered)
+
+    cues = []
+    for digits, a, b in number_group_spans(content):
+        if len(digits) >= 3 and not (len(digits) == 4 and digits[:2] in ("19", "20")) and free(a, b) \
+                and not _NOT_CITATION_BEFORE.search(content[max(0, a - 12):a]):
+            line_start = content.rfind("\n", 0, a) + 1
+            if not DISTRACTOR_LINE.match(content[line_start:a]):
+                cues.append((a, b))
+    cues += [(m.start(), m.end()) for m in _ART_CUE.finditer(content) if free(m.start(), m.end())]
+    cues += [(m.start(), m.end()) for m in _SUMULA_CUE.finditer(content) if free(m.start(), m.end())]
+    for m in re.finditer(r"(?<![A-Za-z])(?:[S5]T[FJM]|T[S5][TE])(?![A-Za-z])", content):
+        if free(m.start(), m.end()) and _YEAR_NEAR_COURT.search(content[m.start():m.end() + 60]):
+            cues.append((m.start(), m.end()))
+    windows = []
+    for a, b in sorted(cues):
+        left = max(content.rfind(". ", max(0, a - 200), a), content.rfind("\n\n", max(0, a - 200), a))
+        start = left + 2 if left >= 0 else max(0, a - 120)
+        right = [x for x in (content.find(". ", b, b + 200), content.find("\n\n", b, b + 200)) if x >= 0]
+        end = min(right) + 1 if right else min(len(content), b + 120)
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((start, end))
+    return [content[a:b] for a, b in windows[:limit]]
+
+
 def _header_end(content: str) -> int:
     """Fim do cabeçalho: início da primeira linha de prosa (o cabeçalho só tem linhas curtas)."""
     pos = 0
@@ -827,7 +1009,8 @@ def _header_end(content: str) -> int:
 
 def from_args(enabled: bool, url: str, model: str, cache: Path | None, *, normalize: bool = True,
               recall: bool = True, workers: int = 1, budget_doc_s: float = 40.0,
-              budget_total_s: float = 3 * 3600.0) -> NLPLayer | None:
+              budget_total_s: float = 3 * 3600.0, second_pass: bool = False,
+              extra_models: tuple[str, ...] = ()) -> NLPLayer | None:
     """Camada pronta para uso, ou None (com aviso) se desligada ou sem servidor/modelo."""
     if not enabled:
         return None
@@ -840,5 +1023,10 @@ def from_args(enabled: bool, url: str, model: str, cache: Path | None, *, normal
         print(f"[nlp] servidor {url} indisponível ou sem o modelo {model}: seguindo só com as regras",
               file=sys.stderr)
         return None
+    extras = tuple(OllamaClient(url, m, cache_dir=cache) for m in extra_models)
+    missing = [c.model for c in extras if not c.available()]
+    if missing:
+        print(f"[nlp] modelos extras indisponíveis ({', '.join(missing)}): seguindo só com {model}", file=sys.stderr)
+        extras = tuple(c for c in extras if c.model not in missing)
     return NLPLayer(client, normalize=normalize, recall=recall, workers=workers, budget_doc_s=budget_doc_s,
-                    budget_total_s=budget_total_s)
+                    budget_total_s=budget_total_s, second_pass=second_pass, extra_clients=extras)
