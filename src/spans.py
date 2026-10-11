@@ -1,19 +1,18 @@
 """Identificação de spans de citação, em qualquer peça.
 
-Três camadas, todas sobre o texto limpo e com os spans devolvidos em codepoints do texto
-ORIGINAL:
+Três camadas, todas sobre o texto limpo e com os spans devolvidos em
+codepoints do texto ORIGINAL:
 
-1. limpeza: desfaz mojibake, remove invisíveis e numeração de margem, junta hifenização de
-   fim de linha e palavras partidas, separa palavras coladas e guarda o mapa de offsets
-   (:func:`clean`, :func:`to_original`);
-2. padrões catalogados: regex das formas conhecidas, tolerantes a OCR
-   (:func:`extract_citations`);
-3. âncoras gerais: partem do que toda citação tem (número + frase jurídica, súmula + número,
-   artigo + diploma, tribunal + ano + relator) e acham formas novas (:func:`expand_spans`,
-   :func:`find_anchors`).
+  1. limpeza: remove invisíveis, junta hifenização de fim de linha e guarda o
+     mapa de offsets (`clean`, `to_original`);
+  2. padrões catalogados: regex das formas conhecidas, tolerantes a OCR
+     (`extract_citations`);
+  3. âncoras gerais: partem do que toda citação tem (número + frase jurídica,
+     súmula + número, artigo + diploma, tribunal + ano + relator) e acham
+     formas novas (`expand_spans`, `find_anchors`).
 
 Aqui só se decide ONDE está cada citação e de que família ela é; a classe
-(real/inventada/incompleta) é decidida em ``classify.py``, contra a base.
+(real/inventada/incompleta) é decidida em classify.py, contra a base.
 """
 
 from __future__ import annotations
@@ -56,30 +55,10 @@ HYPHEN_BREAK = re.compile(r"(?<=[A-Za-zÀ-ÿ])-[ \t]*(?:\r?\n[ \t]*){1,2}(?=[A-Z
 
 
 def clean(text: str, words: frozenset[str] = frozenset()) -> tuple[str, list[int]]:
-    r"""Limpa o texto digitalizado e guarda, para cada caractere, a posição de origem.
+    """(texto limpo, mapa) onde mapa[i] = posição no original do caractere i.
 
-    Em ordem: desfaz mojibake (UTF-8 lido como cp1252/latin-1; o caractere recuperado aponta
-    para o início da sequência), tira a numeração de linha da margem e os caracteres
-    invisíveis, junta a hifenização de fim de linha ("Recur-\nso"), troca espaços estranhos
-    (NBSP, tabulação) por espaço comum, colapsa ".." e ",,", reúne palavras partidas
-    (:func:`_join_split_words`) e separa palavras coladas (:func:`_split_glued`, até três
-    passadas: um corte pode expor outro, como em "oREspnº").
-
-    Parameters
-    ----------
-    text : str
-        Texto original do documento.
-    words : frozenset of str, optional
-        Tokens de nomes da base, já com ``fold``; reforçam o vocabulário usado para juntar
-        palavras partidas ("Anto nio") e separar nomes colados.
-
-    Returns
-    -------
-    cleaned : str
-        Texto limpo.
-    mapping : list of int
-        ``mapping[i]`` é a posição, no original, do caractere ``i`` do texto limpo; o último
-        elemento, a mais, é ``len(text)`` (posição de fim).
+    `words` (tokens de nomes da base, já com fold) reforça o vocabulário usado
+    para juntar palavras partidas ("Anto nio") e separar nomes colados.
     """
     # 0. Mojibake (UTF-8 lido como cp1252/latin-1) volta a ser um caractere, que
     #    aponta para o início da sequência; a numeração de linha da margem sai.
@@ -122,7 +101,19 @@ def clean(text: str, words: frozenset[str] = frozenset()) -> tuple[str, list[int
         cleaned, mapping = _split_glued(cleaned, mapping, words)
         if len(cleaned) == size:
             break
-    return cleaned, mapping
+    return _canonical_cnj(cleaned), mapping
+
+
+def _canonical_cnj(text: str) -> str:
+    """Número CNJ inteiro (7-2-4-1-2-4) com letras de OCR e vírgulas: troca, no lugar, as
+    letras pelos dígitos (OCR_DIGITS) e a vírgula por ponto. Mesmo comprimento: o mapa
+    de offsets não muda. Só com 13+ dígitos reais dos 20, estrutura que texto comum não tem."""
+    def fix(m: re.Match) -> str:
+        raw = m.group()
+        if sum(c.isdigit() for c in raw) < 13:
+            return raw
+        return "".join(OCR_DIGITS_CHAR.get(c, "." if c == "," else c) for c in raw)
+    return _CNJ_LOOSE.sub(fix, text)
 
 
 # UTF-8 decodificado como cp1252 ou latin-1: "ção" -> "Ã§Ã£o", "nº" -> "nÂº", "—" -> "â€”".
@@ -133,18 +124,6 @@ _MOJIBAKE_AMBIGUOUS = set("\xa0 –—‘’“”")
 
 
 def _mojibake_map() -> dict[str, str]:
-    """Monta a tabela de mojibake: sequência corrompida -> caractere original.
-
-    Cada caractere de U+00A0 a U+017F e alguns símbolos tipográficos (travessões, aspas
-    curvas, marcador, reticências, euro) é codificado em UTF-8 e decodificado como cp1252 e
-    como latin-1. Ficam de fora as sequências que continuam com espaço, travessão ou aspas
-    (``_MOJIBAKE_AMBIGUOUS``), que podem ser texto legítimo ("IRMÃ" seguido de aspas).
-
-    Returns
-    -------
-    dict of str to str
-        Sequência de mojibake (2+ caracteres) -> caractere correto.
-    """
     table = {}
     for ch in [chr(c) for c in range(0xA0, 0x180)] + list("–—‘’“”•…€"):
         raw = ch.encode("utf-8")
@@ -167,22 +146,6 @@ _MARGIN_NUMBER = re.compile(r"(?m)^[ \t]*(\d{1,3})(?:[ \t]{2,}|\t)")
 
 
 def _margin_numbers(text: str) -> set[int]:
-    """Posições dos números de linha da margem ("  12  texto"), que a limpeza descarta.
-
-    Só vale quando o documento inteiro usa a numeração: 5 ou mais linhas começando por número
-    seguido de dois espaços ou tabulação, com pelo menos 80% dos números crescentes.
-    "1.  Dos fatos" não casa (tem ponto).
-
-    Parameters
-    ----------
-    text : str
-        Texto original.
-
-    Returns
-    -------
-    set of int
-        Posições dos dígitos da numeração; vazio se o documento não é numerado na margem.
-    """
     found = list(_MARGIN_NUMBER.finditer(text))
     if len(found) < 5:
         return set()
@@ -227,8 +190,14 @@ GLUE_POINTS = [
     # Sigla/classe antes de número com 2+ dígitos: "REsp1.664", "Vinculante10"; "Re1." é "Rel.".
     re.compile(rf"(?<![A-Za-zÀ-ÿ]){_RIGHT_KEYWORDS}"
                rf"(?=\d[\d.,]*\d(?![A-Za-zÀ-ÿ\d])|n[º°.]\s*\d)", re.IGNORECASE),
-    # Número (não colado a letra) antes de conector: "443do", "2016sob"; "Reg1na" é nome.
-    re.compile(rf"{_START}\d[\d.,/\-–]*\d(?=(?-i:dos|das|do|da|de|sob|em|nos|nas|no|na|pelo|pela|d0){_NOT_LETTER})"),
+    # Número (não colado a letra) antes de conector: "443do", "2q0do"; "Reg1na" é nome.
+    re.compile(rf"{_START}\d[\dOolISsgGBbDQqZz|.,/\-–]*[\dOolISsgGBbDQqZz|]"
+               rf"(?=(?-i:dos|das|do|da|de|sob|em|nos|nas|no|na|pelo|pela|d0){_NOT_LETTER})"),
+    # UF colada ao número: "1.664.893PR", "D83RS".
+    re.compile(r"(?<=\d)(?=(?-i:AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)"
+               r"(?![A-Za-zÀ-ÿ\d]))"),
+    # CNJ colado à palavra anterior: "Interno7000792-65.2025...".
+    re.compile(r"(?<=[A-Za-zÀ-ÿ])(?=\d[\dOolISsgGBbDQqZz|]{6}[.\-–]\s*[\dOolISsgGBbDQqZz|]{2}[.\-–,])"),
     re.compile(r"(?<![A-Za-zÀ-ÿ])(?-i:[S5]T[FJM]|T[S5][TE])(?=[a-zà-ÿ]{2,})"),           # "STJproferido"
 ]
 # Palavras que, partidas por um espaço ("Suspe nsão", "julg ado"), são reunidas.
@@ -236,27 +205,8 @@ _JOIN_EXTRA = {"precedente", "acordao", "decisao", "liminar", "sentenca", "suspe
 
 
 def _join_split_words(text: str, mapping: list[int], words: frozenset[str]) -> tuple[str, list[int]]:
-    """Reúne palavras partidas por um espaço ("Suspe nsão" -> "Suspensão").
-
-    O espaço sai quando a junção é palavra jurídica (``LEGAL_VOCABULARY``, ``_JOIN_EXTRA``) ou
-    nome da base e nenhuma das metades é palavra sozinha, conector ou tem menos de 2 letras.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    mapping : list of int
-        Mapa de offsets de ``text`` (ver :func:`clean`).
-    words : frozenset of str
-        Tokens de nomes da base, já com ``fold``.
-
-    Returns
-    -------
-    text : str
-        Texto com as palavras reunidas.
-    mapping : list of int
-        Mapa de offsets correspondente.
-    """
+    """Remove o espaço de "Suspe nsão" quando a junção é palavra jurídica ou nome da base
+    e nenhuma das metades é palavra sozinha."""
     vocab = words | _JOIN_EXTRA | set(LEGAL_VOCABULARY)
     tokens = list(re.finditer(r"[A-Za-zÀ-ÿ]+", text))
     drop = set()
@@ -275,23 +225,7 @@ def _join_split_words(text: str, mapping: list[int], words: frozenset[str]) -> t
 
 
 def _glued_names(text: str, words: frozenset[str]) -> list[int]:
-    """Pontos de corte em nomes colados da base ("CarlosFerreira", "AUGUSTOAMARAL").
-
-    Uma palavra de 8+ letras que não é da base nem do vocabulário jurídico é cortada no
-    primeiro ponto em que as duas metades (4+ letras cada) são nomes da base.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    words : frozenset of str
-        Tokens de nomes da base, já com ``fold``.
-
-    Returns
-    -------
-    list of int
-        Posições, em ``text``, onde falta o espaço.
-    """
+    """Pontos de corte em nomes colados da base: "CarlosFerreira", "AUGUSTOAMARAL"."""
     points = []
     if not words:
         return points
@@ -307,29 +241,7 @@ def _glued_names(text: str, words: frozenset[str]) -> list[int]:
 
 
 def _split_glued(text: str, mapping: list[int], words: frozenset[str] = frozenset()) -> tuple[str, list[int]]:
-    """Insere um espaço onde a digitalização perdeu um ("noARESP", "REsp1.664", "443do").
-
-    Os pontos vêm das regex de ``GLUE_POINTS`` (só fronteiras inequívocas: conector antes de
-    maiúscula, sigla antes de número, número antes de conector, tribunal antes de minúscula) e
-    de :func:`_glued_names`. Ponto já vizinho de espaço é ignorado.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    mapping : list of int
-        Mapa de offsets de ``text`` (ver :func:`clean`).
-    words : frozenset of str, optional
-        Tokens de nomes da base, já com ``fold``.
-
-    Returns
-    -------
-    text : str
-        Texto com os espaços inseridos.
-    mapping : list of int
-        Mapa de offsets correspondente; cada espaço inserido aponta para o caractere seguinte
-        no original.
-    """
+    """Insere um espaço em cada ponto de colagem; o espaço aponta para o caractere seguinte no original."""
     points = {m.end() for rx in GLUE_POINTS for m in rx.finditer(text) if 0 < m.end() < len(text)}
     points.update(_glued_names(text, words))
     out, new_map, pos = [], [], 0
@@ -345,22 +257,7 @@ def _split_glued(text: str, mapping: list[int], words: frozenset[str] = frozense
 
 
 def to_original(mapping: list[int], start: int, end: int) -> tuple[int, int]:
-    """Converte um span do texto limpo para o texto original.
-
-    Parameters
-    ----------
-    mapping : list of int
-        Mapa de offsets devolvido por :func:`clean`.
-    start, end : int
-        Span no texto limpo (fim exclusivo).
-
-    Returns
-    -------
-    start : int
-        Início no original.
-    end : int
-        Fim no original (exclusivo).
-    """
+    """Span no texto limpo -> span no original (fim exclusivo)."""
     return mapping[start], mapping[end - 1] + 1
 
 
@@ -388,19 +285,6 @@ SPLIT_CONFUSABLE = {"m": "(?:m|rn)", "n": "(?:[nu]|ri)", "d": "(?:d|cl)", "h": "
 
 
 def _ocr_char(ch: str) -> str:
-    """Padrão regex de um caractere com as trocas típicas de OCR.
-
-    Parameters
-    ----------
-    ch : str
-        Caractere literal.
-
-    Returns
-    -------
-    str
-        Alternativa de ``SPLIT_CONFUSABLE`` (uma letra lida como duas: "rn" por "m"), classe de
-        ``CONFUSABLE`` ("[s5]" para "s") ou o caractere escapado.
-    """
     if ch.lower() in SPLIT_CONFUSABLE:
         return SPLIT_CONFUSABLE[ch.lower()]
     if ch.lower() in CONFUSABLE:
@@ -409,21 +293,7 @@ def _ocr_char(ch: str) -> str:
 
 
 def ocr(phrase: str) -> str:
-    r"""Regex tolerante a OCR para uma expressão literal.
-
-    Cada letra aceita as trocas de :func:`_ocr_char` ("Súmula" casa "5úmula" e "Súmnla"); os
-    espaços entre palavras viram ``\s+``. Só se aplica a literais fixos, nunca a nomes.
-
-    Parameters
-    ----------
-    phrase : str
-        Expressão literal (ex.: "Superior Tribunal de Justiça").
-
-    Returns
-    -------
-    str
-        Padrão regex, sem grupos de captura.
-    """
+    """Regex tolerante a OCR para uma expressão literal (espaços viram \\s+)."""
     return r"\s+".join("".join(_ocr_char(ch) for ch in word) for word in phrase.split())
 
 # "nº" com OCR: "n°", "no", "n0"; e, só com o sinal ou o ponto, "riº" e "uº"/"u.".
@@ -441,9 +311,11 @@ _D = r"(?:[\dOolISgGBLDQZ]|(?<!\|)\|(?!\|))"
 CNJ_NUMBER = CNJ_SEPARATOR.join((
     rf"(?<![A-Za-zÀ-ÿ])(?:[OolIGSBDQZ|]{{0,3}}\d|[lIOGSBDQZ|](?=\d)){_D}{{0,6}}", rf"{_D}{{2}}", rf"{_D}{{4}}", _D, rf"{_D}{{2}}", rf"{_D}{{4}}"
 ))
+# CNJ com vírgula entre blocos ("7000765-81,Z024,7,00,0000"): usado só na canonização.
+_CNJ_LOOSE = re.compile(CNJ_NUMBER.replace(CNJ_SEPARATOR, r"[\s.,\-–/]*") + r"(?![\dOolISgGBLDQZ|])", re.IGNORECASE)
+OCR_DIGITS_CHAR = {chr(k): v for k, v in OCR_DIGITS.items()}
 # Número de lei, com OCR a partir do 2º caractere ("g.504" também: 1º seguido de ".").
-# Número de lei: "9.504", "l3.467", "13.-467" (hífen de quebra de linha depois do ponto).
-SHORT_NUMBER = rf"(?:\d|[lIOSgQZ|](?=[\d.]))[\dOolISgGBQZ|]*(?:\s*\.[\s\-]*[\dOolISgGBQZ|]+)*"
+SHORT_NUMBER = rf"(?:\d|[lIOSgQZ|](?=[\d.]))[\dOolISgGBQZ|]*(?:\s*\.\s*[\dOolISgGBQZ|]+)*"
 # Espaços entre milhares são aceitos só em grupos de três dígitos.
 # O formato de leis permanece separado para não ampliar essa família.
 # Dígitos podem vir trocados por letras parecidas ("21737l8", "1.528.4S5");
@@ -462,26 +334,11 @@ PROCESS_NUMBER = rf"(?:{CNJ_NUMBER}|{PROCESS_SHORT_NUMBER})"
 # Ano com OCR nos dígitos ("201g", "20l7").
 YEAR = r"(?:19|[2Z][0OD])[\dOolIgSBDQZ|]{2}(?!\w)"
 # "-5P" é a UF SP com OCR, não continuação do número.
-# O número continua depois de ponto/hífen com no máximo uma quebra de linha de cada lado ("33.-\n474");
-# linha em branco encerra o número ("067.\n\n3. DOS PEDIDOS" é outro parágrafo).
-_WS1 = r"[^\S\n]*(?:\n[^\S\n]*)?"
-NUMBER_END = rf"(?!\w)(?!{_WS1}[.\-–]{_WS1}(?!(?-i:5[A-Z])\b)\d)(?!,\d)"
+NUMBER_END = r"(?!\w)(?!\s*[.\-–]\s*(?!(?-i:5[A-Z])\b)\d)(?!,\d)"
 STATE_SUFFIX = rf"(?:\s*(?:[/–-]\s*{UF}\b|\({UF}\)))?"
 
 def ocr_alternatives(phrases: list[str]) -> str:
-    """Une expressões literais numa alternância tolerante a OCR.
-
-    Parameters
-    ----------
-    phrases : list of str
-        Expressões literais.
-
-    Returns
-    -------
-    str
-        Padrão ``a|b|...`` com :func:`ocr` de cada expressão, das mais longas para as mais
-        curtas (a mais longa ganha: "Recurso Especial Eleitoral" antes de "Recurso Especial").
-    """
+    """Alternativas tolerantes a OCR, das mais longas para as mais curtas."""
     return "|".join(ocr(p) for p in sorted(phrases, key=len, reverse=True))
 
 
@@ -549,7 +406,7 @@ DIPLOMA_NAMES = [
 DIPLOMA = rf"""(?:
     {ocr_alternatives(DIPLOMA_NAMES)}
     | {CONSTITUICAO}
-    | N?CPC | CPP | CDC | CPM | CC | CP | CLT | CF(?:/[\dB]{2})? | CR(?:FB)?(?:/[\dB]{2})?
+    | CPC | CPP | CDC | CPM | CC | CP | CLT | CF(?:/[\dB]{2})?
 )"""
 LAW_NUMBER = (
     rf"(?:{ocr('Lei')}\s+(?:{ocr('Complementar')}\s+)?|LC\s+)"
@@ -564,7 +421,7 @@ ALINEA = r"(?:alínea\s+)?['\"‘’][a-z]['\"‘’]"
 ARTIGOS = re.compile(
     rf"\b(?:{ocr('artigo')}|{ocr('art')}\.?)\s+{ARTICLE_NUMBER}"
     rf"(?:\s*,\s*(?:{PARAGRAPH}|{INCISO}|{ALINEA}))*"
-    rf"\s*,?\s*(?:d|cl)[oaã0]\s+(?:{LAW_NUMBER}|{DIPLOMA})(?!\w)",  # "cla CLT": OCR de "da"
+    rf"\s*,?\s*d[oaã0]\s+(?:{LAW_NUMBER}|{DIPLOMA})(?!\w)",
     FLAGS,
 )
 
@@ -580,12 +437,9 @@ ARTIGOS_INVERTIDOS = re.compile(
 # (?-i:...) mantém a inicial maiúscula como sinal de continuação do nome.
 NAME_WORD = r"(?-i:[A-ZÀ-ÖØ-Þ][a-zA-ZÀ-ÖØ-öø-ÿ0-9]*)"
 RELATOR_NAME = rf"{NAME_WORD}(?:\s+(?:(?:de|da|do|dos|das)\s+)?{NAME_WORD})*"
-# Classe + ano + relator: "Rcl de 2021, Rel. Min. Rosa Weber"; vale para qualquer classe, inclusive as do
-# TST ("RR de 2016, Rel. Min. …"), e para "Rel."/"Min." com OCR ("Rcl. Mln.").
-DESCRIPTIVE_CLASS = rf"(?:{PROCESS_CLASS}|A?I?RR|ARR)"
 PROCESSOS_DESCRITIVOS = re.compile(
-    rf"\b{DESCRIPTIVE_CLASS}\.?\s+(?:{ocr('do')}\s+{TRIBUNAL}\s*,?\s*)?"
-    rf"{ocr('de')}\s+{YEAR}\s*,\s*{ocr('Rel')}\.\s*M[il1í]n\.\s*{RELATOR_NAME}",
+    rf"\b{PROCESS_CLASS}\.?\s+(?:{ocr('do')}\s+{TRIBUNAL}\s*,?\s*)?"
+    rf"{ocr('de')}\s+{YEAR}\s*,\s*Rel\.\s*Min\.\s*{RELATOR_NAME}",
     FLAGS,
 )
 
@@ -620,22 +474,9 @@ PATTERNS = (
 
 
 def extract_citations(content: str) -> list[dict]:
-    """Aplica os padrões catalogados (``PATTERNS``) ao texto limpo.
+    """Aplica os padrões e remove candidatos contidos em outro (Rcl dentro de AgInt na Rcl).
 
-    Candidatos contidos em outro são descartados ("Rcl 1" dentro de "AgInt na Rcl 1");
-    ocorrências da mesma referência em posições diferentes são preservadas.
-
-    Parameters
-    ----------
-    content : str
-        Texto limpo.
-
-    Returns
-    -------
-    list of dict
-        Citações em ordem de posição, com as chaves ``inicio`` e ``fim`` (no texto limpo),
-        ``trecho``, ``tipo`` (``jurisprudencia`` ou ``lei``) e ``familia`` (``processos``,
-        ``sumulas``, ``artigos``...).
+    Ocorrências da mesma referência em posições diferentes são preservadas.
     """
     candidates = [
         {"inicio": m.start(), "fim": m.end(), "trecho": m.group(), "tipo": tipo, "familia": familia}
@@ -692,21 +533,7 @@ _COURT_FULL_RE = re.compile(COURT_FULL, re.IGNORECASE)
 
 
 def courts_in(text: str) -> list[str]:
-    """Siglas dos tribunais mencionados no texto, em ordem.
-
-    Reconhece a sigla (também com OCR: "5TJ", "T5T") e o nome por extenso, com ou sem
-    honorífico ("Eg. STJ", "Colendo Tribunal Superior do Trabalho").
-
-    Parameters
-    ----------
-    text : str
-        Trecho a examinar.
-
-    Returns
-    -------
-    list of str
-        Siglas (``STJ``, ``STF``, ``TST``, ``TSE`` ou ``STM``), uma por menção, com repetições.
-    """
+    """Siglas dos tribunais mencionados no texto, na ordem."""
     return [m.lastgroup for m in COURT_RE.finditer(text) if m.lastgroup]
 
 
@@ -722,39 +549,10 @@ DATE = re.compile(rf"(?<![\w/.\-])(?:[\dOolIBSG]{{1,2}}[./\-]){{1,2}}{_YEAR}(?![
 
 
 def _digits(text: str) -> str:
-    """Dígitos de um número escrito, depois de converter as letras de OCR.
-
-    Parameters
-    ----------
-    text : str
-        Número como escrito ("1.528.4S5").
-
-    Returns
-    -------
-    str
-        Só os dígitos ("1528455"); as letras são convertidas por ``normalize.OCR_DIGITS``.
-    """
     return re.sub(r"\D", "", text.translate(OCR_DIGITS))
 
 
 def _is_process_number(m: re.Match, text: str) -> bool:
-    """Diz se um número achado por ``NUMBER_RE`` pode ser número de processo.
-
-    Recusa números com menos de 4 dígitos, anos soltos (também com OCR: "2O24", "201g"),
-    valores em dinheiro ("R$", "$") e folhas ("fl.", "fls.").
-
-    Parameters
-    ----------
-    m : re.Match
-        Ocorrência de ``NUMBER_RE``.
-    text : str
-        Texto em que ``m`` foi achado (para olhar o que vem antes).
-
-    Returns
-    -------
-    bool
-        ``True`` se o número pode ser de processo.
-    """
     raw = m.group()
     if len(_digits(raw)) < 4 or re.fullmatch(_YEAR, raw):
         return False  # curto demais ou ano solto (também com OCR: "2O24", "201g")
@@ -763,23 +561,7 @@ def _is_process_number(m: re.Match, text: str) -> bool:
 
 
 def _years(text: str, lo: int, hi: int) -> list[tuple[int, int]]:
-    """Spans de ano entre ``lo`` e ``hi``, sozinho ou dentro de data.
-
-    Uma data ("10/10/2020", "11.09.2010", "10/2024") vira um span só; ano seguido de ponto e
-    dígito ("2015.5.03") é bloco de CNJ e não conta.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    lo, hi : int
-        Janela de busca.
-
-    Returns
-    -------
-    list of tuple of (int, int)
-        Spans ``(início, fim)`` em ordem.
-    """
+    """Spans de ano (sozinho ou dentro de data) entre lo e hi."""
     dates = [(m.start(), m.end()) for m in DATE.finditer(text, lo, hi)]
     alone = [(m.start(), m.end()) for m in YEAR_ALONE.finditer(text, lo, hi)
              if not any(s <= m.start() < e for s, e in dates)]
@@ -814,22 +596,7 @@ _TOKEN = re.compile(r"[^\s/\-–—(),;:]+")
 
 
 def _kind(token: str) -> str | None:
-    """Classifica uma palavra da frase que precede um número de processo.
-
-    Parameters
-    ----------
-    token : str
-        Palavra, possivelmente com pontuação ("Rccl.", "n°", "STJ,").
-
-    Returns
-    -------
-    str or None
-        ``"class"`` se a palavra dá sentido de processo (sigla de classe, também com OCR, como
-        "Rccl." por "Recl.", ou palavra como "recurso" e "agravo" e suas abreviações);
-        ``"legal"`` se é palavra jurídica que só complementa a classe ("especial", "interno");
-        ``"glue"`` se é conector ou marcador de número ("do", "nº", "d0"); ``"court"`` se é
-        tribunal; ``None`` para qualquer outra palavra.
-    """
+    """'class' (dá sentido de processo), 'legal', 'glue' (conector/marcador), 'court' ou None."""
     bare = token.strip(".,;:")
     if not bare or bare in ("º", "°"):
         return "glue"
@@ -855,21 +622,9 @@ def _kind(token: str) -> str | None:
 
 
 def _looks_like_class_acronym(word: str) -> bool:
-    """Diz se a palavra tem forma de sigla de classe (mesmo desconhecida).
+    """Sigla de classe: caixa-alta curta ("REE", "AG") ou mista ("AgIn", "AgRreg").
 
-    Vale caixa-alta curta, de 2 a 4 letras ("REE", "AG"), ou caixa mista com 2+ maiúsculas e
-    até 7 letras ("AgIn", "AgRreg"). Palavra de cabeçalho em caixa-alta ("PARECER",
-    "MILITAR") não conta.
-
-    Parameters
-    ----------
-    word : str
-        Palavra sem pontuação.
-
-    Returns
-    -------
-    bool
-        ``True`` se parece sigla de classe.
+    Palavra de cabeçalho em caixa-alta ("PARECER", "MILITAR") não conta.
     """
     upper = sum(c.isupper() for c in word)
     if not re.fullmatch(r"[A-Za-z]{2,7}", word) or upper < 2:
@@ -879,35 +634,13 @@ def _looks_like_class_acronym(word: str) -> bool:
 
 def _phrase_start(text: str, number_start: int, floor: int, strong: bool = False,
                   acronyms: bool = False) -> int | None:
-    """Início da frase jurídica colada antes de um número de processo.
+    """Início da frase jurídica colada antes do número, ou None.
 
-    Anda para a esquerda do número (até 160 caracteres, sem passar de ``floor``) e para em
-    pontuação e em qualquer palavra que não seja classe, recurso ou conector (ver
-    :func:`_kind`). Com número forte, aceita vírgula entre os elementos e o tribunal colado à
-    classe ou ao número ("STJ, Recurso Especial, 1511083"; "RR TST 0010147-…"). Tribunal
-    separado da classe por conector é de outra citação ("…Eg. TST e Agravo…") e encerra a
-    frase. Conectores no início da frase ficam de fora.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    number_start : int
-        Posição do número.
-    floor : int
-        Limite à esquerda (fim da citação anterior).
-    strong : bool, default False
-        Número forte (CNJ ou 5+ dígitos).
-    acronyms : bool, default False
-        Aceita como classe uma sigla desconhecida ("REE", "AgIn"; ver
-        :func:`_looks_like_class_acronym`); usado antes de CNJ da Justiça do Trabalho,
-        Eleitoral ou Militar.
-
-    Returns
-    -------
-    int or None
-        Início da frase, ou ``None`` se ela não tem palavra de classe ou é autorreferência
-        ("o presente recurso especial nº …" é o próprio processo, não citação).
+    Para em pontuação e em qualquer palavra que não seja classe, recurso ou
+    conector. Com número forte (`strong`: CNJ ou 5+ dígitos), aceita vírgula
+    entre os elementos e o tribunal colado à classe ou ao número ("STJ, Recurso
+    Especial, 1511083"; "RR TST 0010147-…"). Tribunal separado da classe por
+    conector é de outra citação ("…Eg. TST e Agravo…") e encerra a frase.
     """
     tokens = list(_TOKEN.finditer(text, max(floor, number_start - 160), number_start))
     kept: list[tuple[re.Match, str]] = []
@@ -963,28 +696,8 @@ _SUMULA_TAIL = re.compile(
 
 
 def _extend(text: str, start: int, end: int, floor: int = 0) -> tuple[int, int]:
-    """Alarga o span de um processo com o que está colado a ele.
-
-    À direita, até três sufixos de UF ou tribunal ("…/SP (STJ)", "…, do STJ") e os itens
-    listados depois (:func:`_trailing_items`: "…/RS, Agravo Interno, Embargos de Declaração,
-    STJ"); à esquerda, o tribunal que abre a citação ("C. STJ, …"; :func:`_court_prefix`).
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    start, end : int
-        Span atual.
-    floor : int, default 0
-        Limite à esquerda (fim da citação anterior).
-
-    Returns
-    -------
-    start : int
-        Novo início.
-    end : int
-        Novo fim.
-    """
+    """Inclui UF e tribunal colados à citação ("…/SP (STJ)", "C. STJ, …") e os recursos
+    listados depois do número ("…/RS, Agravo Interno, Embargos de Declaração, STJ")."""
     for _ in range(3):
         m = _UF_SUFFIX.match(text, end) or _COURT_SUFFIX.match(text, end)
         if not m:
@@ -999,22 +712,9 @@ _ITEM_SEP = re.compile(r"[ \t]*,[ \t]*")
 def _trailing_items(text: str, end: int) -> int:
     """Fim dos itens ", <recurso/tribunal/UF>" colados depois da citação.
 
-    Cada item é uma sequência de palavras de classe, recurso, tribunal ou UF, com conectores
-    no meio, nos 80 caracteres depois da vírgula. Item com número é outra citação ("…, AgInt
-    no REsp 2/RJ") e encerra a lista; palavra comum encerra o item. Ponto final de frase fica
-    fora ("…, STF."); ponto de abreviação fica ("Ag. Reg.").
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    end : int
-        Fim atual da citação.
-
-    Returns
-    -------
-    int
-        Novo fim (igual a ``end`` se não há itens).
+    Cada item é uma sequência de palavras de classe/recurso/tribunal/UF (com
+    conectores no meio). Item com número é outra citação ("…, AgInt no REsp 2/RJ")
+    e encerra a lista; palavra comum encerra o item.
     """
     while sep := _ITEM_SEP.match(text, end):
         prev, item_end = sep.end(), None
@@ -1040,51 +740,13 @@ def _trailing_items(text: str, end: int) -> int:
 
 
 def _court_prefix(text: str, start: int, floor: int) -> int:
-    """Início do tribunal que abre a citação ("STJ, REsp 1/SP", "C. STJ - …").
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    start : int
-        Início atual da citação.
-    floor : int
-        Limite à esquerda (fim da citação anterior).
-
-    Returns
-    -------
-    int
-        Início do tribunal, se nos 80 caracteres anteriores (sem passar de ``floor``) há um
-        tribunal seguido só de vírgula, dois-pontos ou travessão; senão, ``start``.
-    """
     window = max(floor, start - 80)
     m = _COURT_PREFIX.search(text[window:start])
     return window + m.start() if m else start
 
 
 def expand_spans(text: str, citations: list[dict]) -> list[dict]:
-    """Alarga os spans do regex com o que está colado a eles.
-
-    Por família: processos ganham a frase jurídica à esquerda (:func:`_phrase_start`), UF,
-    tribunal e recursos listados (:func:`_extend`); artigos ganham o ano da lei ("/1990",
-    " de 1990") e, na ordem invertida ("CPM, art. 290"), a enumeração depois do número
-    ("incisos I a III"); súmulas ganham item, "da Súmula", tribunal e o tribunal à esquerda.
-    Processo cujo "número" é um ano seguido de relator ("REsp 2019, Rel. Min. …") é citação
-    descritiva, não numerada, e sai da lista.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    citations : list of dict
-        Citações de :func:`extract_citations`.
-
-    Returns
-    -------
-    list of dict
-        Citações em ordem de posição; as alargadas são cópias com ``inicio``, ``fim`` e
-        ``trecho`` novos.
-    """
+    """Alarga spans do regex com o que está colado a eles (tribunal, UF, item, ano)."""
     out: list[dict] = []
     for c in sorted(citations, key=lambda c: c["inicio"]):
         floor = max([o["fim"] for o in out if o["fim"] <= c["inicio"]], default=0)
@@ -1111,21 +773,6 @@ def expand_spans(text: str, citations: list[dict]) -> list[dict]:
 
 
 def _year_before_relator(text: str, c: dict) -> bool:
-    """Diz se o "número" do processo é um ano seguido de relator ("REsp 2019, Rel. Min. …").
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    c : dict
-        Citação do regex (usa ``trecho`` e ``fim``).
-
-    Returns
-    -------
-    bool
-        ``True`` se a última palavra do trecho é um ano e uma pista de relatoria vem até 40
-        caracteres depois, na mesma frase.
-    """
     number = re.search(r"\S+$", c["trecho"]).group()
     return bool(re.fullmatch(_YEAR, number)) and bool(
         re.match(rf"[^.;\n]{{0,40}}?(?<!\w)(?:{_REL_CUE_PATTERN})", text[c["fim"]:c["fim"] + 80], re.IGNORECASE))
@@ -1134,111 +781,22 @@ def _year_before_relator(text: str, c: dict) -> bool:
 # ------------------------------------------------------------------ âncoras
 
 def _overlaps(start: int, end: int, taken: list[tuple[int, int]]) -> bool:
-    """Diz se o span se sobrepõe a algum dos já tomados.
-
-    Parameters
-    ----------
-    start, end : int
-        Span a testar.
-    taken : list of tuple of (int, int)
-        Spans já tomados.
-
-    Returns
-    -------
-    bool
-        ``True`` se há interseção não vazia.
-    """
     return any(s < end and start < e for s, e in taken)
 
 
 def _floor(taken: list[tuple[int, int]], pos: int) -> int:
-    """Fim do último span tomado que termina até ``pos``.
-
-    Parameters
-    ----------
-    taken : list of tuple of (int, int)
-        Spans já tomados.
-    pos : int
-        Posição de referência.
-
-    Returns
-    -------
-    int
-        Maior fim ``<= pos`` (0 se não há), limite à esquerda da citação que começa em ``pos``.
-    """
     return max([e for s, e in taken if e <= pos], default=0)
 
 
 def _candidate(text: str, start: int, end: int, familia: str, tipo: str) -> dict:
-    """Monta uma citação achada por âncora.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    start, end : int
-        Span da citação.
-    familia : str
-        Família (``processos``, ``sumulas``, ``artigos`` ou ``julgados_descritivos``).
-    tipo : str
-        Tipo do contrato (``jurisprudencia`` ou ``lei``).
-
-    Returns
-    -------
-    dict
-        Citação no formato de :func:`extract_citations`, com ``origem="ancora"``.
-    """
     return {"inicio": start, "fim": end, "trecho": text[start:end], "tipo": tipo,
             "familia": familia, "origem": "ancora"}
 
 
-_SECTION_NUMBER = re.compile(r"\d{1,2}\.?\s*[.)\-–—]\s+[A-ZÀ-Ý]{2}")
-
-
-def _section_number(m: re.Match, text: str) -> bool:
-    """Diz se o número é o de um título de seção ("3. DOS PEDIDOS", "2 - DO MÉRITO").
-
-    Parameters
-    ----------
-    m : re.Match
-        Ocorrência de ``NUMBER_RE``.
-    text : str
-        Texto limpo.
-
-    Returns
-    -------
-    bool
-        ``True`` se o número (1 ou 2 dígitos) abre a linha e vem seguido de ponto, parêntese ou
-        travessão e de palavra em caixa-alta.
-    """
-    line_start = text.rfind("\n", 0, m.start()) + 1
-    return not text[line_start:m.start()].strip() and bool(_SECTION_NUMBER.match(text, m.start()))
-
-
 def _process_anchors(text: str, taken: list[tuple[int, int]]) -> list[dict]:
-    """Âncoras de processo: número com cara de processo e frase jurídica colada antes.
-
-    O número (:func:`_is_process_number`, fora de título de seção) precisa de uma frase com
-    classe à esquerda (:func:`_phrase_start`); número forte (5+ dígitos) aceita vírgulas e
-    tribunal na frase, e CNJ da Justiça do Trabalho, Eleitoral ou Militar
-    (``normalize.cnj_justice``) aceita sigla desconhecida. O span é alargado com
-    :func:`_extend`.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    taken : list of tuple of (int, int)
-        Spans já tomados; recebe os novos.
-
-    Returns
-    -------
-    list of dict
-        Citações novas da família ``processos`` (tipo ``jurisprudencia``).
-    """
     found = []
     for m in NUMBER_RE.finditer(text):
-        if not _is_process_number(m, text) or _overlaps(m.start(), m.end(), taken) or _section_number(m, text):
+        if not _is_process_number(m, text) or _overlaps(m.start(), m.end(), taken):
             continue
         floor = _floor(taken, m.start())
         digits = _digits(m.group())
@@ -1266,21 +824,7 @@ _SUMULA_NUM = re.compile(r"(?<![\w.])(?:\d|[lIBgGSOQZ|](?=[\dOolISsgGBbDQqZz|]{0
 
 
 def _sumula_gap_ok(gap: str) -> bool:
-    """Diz se o trecho entre a pista de súmula e o número é aceitável.
-
-    Só cabem marcador de número ("nº"), conector ("de", "da", "do"), "vinculante",
-    "súmula"/"sumular" e tribunal ("Súmula do STJ nº 7", "Enunciado sumular 83").
-
-    Parameters
-    ----------
-    gap : str
-        Texto entre a pista e o número.
-
-    Returns
-    -------
-    bool
-        ``True`` se só há palavras permitidas.
-    """
+    """Entre a pista e o número só cabem: marcador, conector, vinculante, tribunal."""
     rest = COURT_RE.sub(" ", gap)
     for tok in re.findall(r"[^\s\-–—,]+", rest):
         bare = tok.strip(".")
@@ -1292,25 +836,6 @@ def _sumula_gap_ok(gap: str) -> bool:
 
 
 def _sumula_anchors(text: str, taken: list[tuple[int, int]]) -> list[dict]:
-    """Âncoras de súmula: pista (súmula, enunciado, verbete, "SV") seguida de número.
-
-    Vale o primeiro número nos 80 caracteres depois da pista, só com marcador, conector,
-    "vinculante" ou tribunal no meio (:func:`_sumula_gap_ok`); o span inclui item, tribunal e
-    o tribunal à esquerda. Pista fraca ("enunciado", "verbete") exige "súmula", "vinculante" ou
-    tribunal no trecho.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    taken : list of tuple of (int, int)
-        Spans já tomados; recebe os novos.
-
-    Returns
-    -------
-    list of dict
-        Citações novas da família ``sumulas`` (tipo ``jurisprudencia``).
-    """
     found = []
     for cue in _SUMULA_CUE.finditer(text):
         if _overlaps(cue.start(), cue.end(), taken):
@@ -1351,7 +876,7 @@ _ENUM_ITEM = (
 _ENUM = re.compile(rf"(?:\s*,\s*|\s+(?:e|[aã])\s+|\s+){_ENUM_ITEM}", re.IGNORECASE)
 # Entre artigo e diploma: "do/da" (com OCR), vírgula, travessão ou só espaço.
 _PREPS = [re.compile(p, re.IGNORECASE) for p in (
-    r"\s*,?\s*(?:(?:d|cl)[oaã0ó]s?|n[oa])\s+", r"\s*,\s*", r"\s*[–—-]\s*", r"\s+")]  # "cla": OCR de "da"
+    r"\s*,?\s*(?:d[oaã0ó]s?|n[oa])\s+", r"\s*,\s*", r"\s*[–—-]\s*", r"\s+")]
 _PHRASE_WORD = re.compile(r"[^\s,;]+")
 # Palavras que podem compor o nome de um diploma (além de Maiúsculas, números
 # e conectores). Radicais gerais; nada específico de catálogo de teste.
@@ -1364,115 +889,40 @@ _DIPLOMA_WORDS = (
 
 
 # Número de lei com OCR, "g.504/1997", "13.467/Z017", "(8.078/90)".
-_LAW_NUMBER_WORD = re.compile(r"\(?[\dlIOSGBgqZ|][\dlIOoSsGgqBbZz|.\s\-]*/\s*[\dOolIGgqSsZzBb|]{2,4}\)?")  # "13.-467/2017"
+_LAW_NUMBER_WORD = re.compile(r"\(?[\dlIOSGBgqZ|][\dlIOoSsGgqBbZz|.\s]*/\s*[\dOolIGgqSsZzBb|]{2,4}\)?")
 
 
 def _diploma_word(word: str) -> bool:
-    """Diz se a palavra pode compor o nome de um diploma.
-
-    Vale palavra com maiúscula inicial ou dígito, marcador de número ("nº", também com OCR),
-    número de lei ("8.078/90"), radical ou sigla de diploma (:func:`_diploma_content`) e
-    conector (também com OCR: "d0", "cm").
-
-    Parameters
-    ----------
-    word : str
-        Palavra, possivelmente com pontuação.
-
-    Returns
-    -------
-    bool
-        ``True`` se a palavra pode estar num nome de lei; palavra só de pontuação também conta.
-    """
     bare = word.strip("().,;:'\"")
     if not bare:
         return True
-    if bare[0].isupper() or bare[0].isdigit() or bare in ("nº", "n.º", "n°", "riº", "ri°", "uº", "u°", "/") or _LAW_NUMBER_WORD.fullmatch(bare):
+    if bare[0].isupper() or bare[0].isdigit() or bare in ("nº", "n.º", "n°", "/") or _LAW_NUMBER_WORD.fullmatch(bare):
         return True
     return _diploma_content(bare) or fold(bare).translate(_GLUE_OCR) in CONNECTORS
 
 
 def _diploma_content(word: str) -> bool:
-    """Diz se a palavra, por si, indica um diploma.
-
-    Parameters
-    ----------
-    word : str
-        Palavra, possivelmente com pontuação.
-
-    Returns
-    -------
-    bool
-        ``True`` se começa por um radical de ``_DIPLOMA_WORDS`` ("constitu", "codigo") ou é
-        sigla de diploma ("CLT"; ver ``normalize.diploma_key``).
-    """
+    """Palavra que por si indica diploma: radical ("constitu", "codigo") ou sigla ("clt")."""
     bare = word.strip("().,;:'\"")
     low = canonical_words(bare).strip(" .")
     return any(low.startswith(stem) for stem in _DIPLOMA_WORDS) or bool(diploma_key(bare))
 
 
 def _diploma_last(word: str) -> bool:
-    """Diz se a palavra pode fechar o nome de uma lei.
-
-    Parameters
-    ----------
-    word : str
-        Palavra, possivelmente com pontuação final.
-
-    Returns
-    -------
-    bool
-        ``True`` para radical ou sigla de diploma, número de lei ("8.078/90"), ano ou palavra
-        terminada em ")".
-    """
+    """Última palavra de um nome de lei: radical/sigla, número de lei, ano ou ')'."""
     bare = word.rstrip(".,;:")
     return (bare.endswith(")") or _diploma_content(bare)
             or _LAW_NUMBER_WORD.fullmatch(bare) is not None or re.fullmatch(r"(?:19|20)\d\d", bare) is not None)
 
 
 def _ends_sentence(word: str) -> bool:
-    """Diz se a palavra fecha uma frase.
-
-    "Confiram-se:", "julgado." e "2022." fecham; "Esp.", "n." e "Lei." (abreviações) não.
-
-    Parameters
-    ----------
-    word : str
-        Palavra com a pontuação.
-
-    Returns
-    -------
-    bool
-        ``True`` se termina em dois-pontos ou ponto e vírgula, ou em ponto depois de número ou
-        de palavra com mais de 5 letras.
-    """
+    """'Confiram-se:', 'autos.' e '2022.' fecham frase; 'Esp.', 'n.' e 'Lei.' não."""
     return word.endswith((":", ";")) or (word.endswith(".") and (
         word[0].isdigit() or len(word.strip(".")) > 5))
 
 
 def _longest_diploma(text: str, start: int, max_words: int = 12) -> int | None:
-    """Fim do maior trecho a partir de ``start`` que é um diploma reconhecível.
-
-    Junta até ``max_words`` palavras que podem compor nome de lei (:func:`_diploma_word`),
-    parando em vírgula, ponto e vírgula, duas linhas em branco ou fim de frase; depois tenta
-    do trecho mais longo ao mais curto, que precisa terminar em palavra de fecho
-    (:func:`_diploma_last`) e ter chave de diploma (``normalize.diploma_key``). Parêntese
-    aberto no trecho é fechado se o ")" vem logo depois.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    start : int
-        Onde o diploma deve começar (depois de "da", da vírgula...).
-    max_words : int, default 12
-        Máximo de palavras do nome.
-
-    Returns
-    -------
-    int or None
-        Fim do diploma, ou ``None`` se nenhum trecho é diploma reconhecível.
-    """
+    """Fim do maior trecho a partir de `start` que é um diploma reconhecível."""
     words = []
     prev_end = start
     for w in _PHRASE_WORD.finditer(text, start, min(len(text), start + 160)):
@@ -1495,25 +945,7 @@ def _longest_diploma(text: str, start: int, max_words: int = 12) -> int | None:
 
 
 def _diploma_before(text: str, head_end: int) -> int | None:
-    """Início do diploma que termina em ``head_end``, na ordem invertida ("CF, art. 5º").
-
-    Volta palavra a palavra (até 100 caracteres) enquanto elas podem compor nome de lei, sem
-    atravessar vírgula, ponto e vírgula, duas linhas em branco ou fim de frase; depois tenta
-    do trecho mais longo ao mais curto, que precisa começar por palavra de diploma (nem
-    conector, "e Lei …", nem maiúscula solta, "Ver CF") e ter chave de diploma.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    head_end : int
-        Fim do diploma (antes da vírgula ou do travessão que precede o artigo).
-
-    Returns
-    -------
-    int or None
-        Início do diploma, ou ``None`` se não há diploma reconhecível.
-    """
+    """Início do diploma que termina em `head_end` ("CF", "Código Civil (Lei …)")."""
     allowed = []  # sufixo contínuo de palavras que podem compor nome de lei
     right = head_end
     for w in reversed(list(_PHRASE_WORD.finditer(text, max(0, head_end - 100), head_end))):
@@ -1530,22 +962,7 @@ def _diploma_before(text: str, head_end: int) -> int | None:
 
 
 def article_diploma(trecho: str) -> str | None:
-    """Chave do diploma de uma citação de artigo, nas duas ordens.
-
-    Procura o diploma depois do número e da enumeração ("art. 5º, LV, da CF") e, se não
-    houver, antes da pista ("CF, art. 5º").
-
-    Parameters
-    ----------
-    trecho : str
-        Trecho da citação.
-
-    Returns
-    -------
-    str or None
-        Chave de ``normalize.diploma_key`` ("CF", "CPC", "LEI:8078/1990"...), ou ``None`` se
-        não há pista de artigo ou diploma reconhecível.
-    """
+    """Chave do diploma de uma citação de artigo, nas duas ordens."""
     cue = _ART_CUE.search(trecho)
     if not cue:
         return None
@@ -1562,23 +979,6 @@ def article_diploma(trecho: str) -> str | None:
 
 
 def _article_anchors(text: str, taken: list[tuple[int, int]]) -> list[dict]:
-    """Âncoras de artigo: "art."/"artigo" + número (+ enumeração) + diploma reconhecível.
-
-    Nas duas ordens: diploma depois ("art. 5º, LV, da CF", "art. 5º - CF"; enumeração de até
-    80 caracteres) ou antes ("CF, art. 5º", "Código Civil - art. 186").
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    taken : list of tuple of (int, int)
-        Spans já tomados; recebe os novos.
-
-    Returns
-    -------
-    list of dict
-        Citações novas da família ``artigos`` (tipo ``lei``).
-    """
     found = []
     for cue in _ART_CUE.finditer(text):
         if _overlaps(cue.start(), cue.end(), taken):
@@ -1639,22 +1039,11 @@ _DESCRIPTOR = {
 
 
 def relator_name(text: str) -> tuple[int, int, str] | None:
-    """Primeiro relator citado no texto, com a pista ("Rel. Min.", "relatoria do").
+    """(início da pista, fim do nome, nome) do primeiro relator citado no texto.
 
-    O nome começa depois da pista e das palavras de ligação ("Min.", "Des.", "p/ acórdão"...),
-    é cortado na primeira palavra que não pode ser nome (título, tribunal, "julgado"...) e
-    precisa de duas palavras (as partículas "de", "da"... não contam). Se o trecho depois da
-    pista está todo em minúsculas, aceita nome em minúsculas.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo ou trecho de citação.
-
-    Returns
-    -------
-    tuple of (int, int, str) or None
-        ``(início da pista, fim do nome, nome)``, ou ``None`` se não há relator com nome.
+    O nome é cortado na primeira palavra que não pode ser nome (título,
+    tribunal, "julgado"...) e precisa de duas palavras. Em trechos todo em
+    minúsculas, aceita nome em minúsculas.
     """
     for cue in _REL_CUE.finditer(text):
         glue = _REL_GLUE.match(text, cue.end())
@@ -1692,27 +1081,7 @@ _TAIL = re.compile(
 
 
 def _clause(text: str, pos: int) -> tuple[int, int]:
-    """Limites da oração em volta de ``pos``.
-
-    A oração termina em ponto e vírgula, linha em branco, fim de frase real (ponto depois de 5
-    letras ou dígitos, seguido de maiúscula), "bem como" ou " e " que abre outra citação
-    ("…Rel. Min. X e REsp …", "… e acórdão do STJ …"); a janela é de 220 caracteres para cada
-    lado.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    pos : int
-        Posição dentro da oração (início do relator).
-
-    Returns
-    -------
-    start : int
-        Início da oração.
-    end : int
-        Fim da oração.
-    """
+    """Limites da oração em volta de `pos` (';', quebra dupla, fim de frase real)."""
     base = max(0, pos - 220)
     right = min(len(text), pos + 220)
     left = base
@@ -1728,43 +1097,15 @@ def _clause(text: str, pos: int) -> tuple[int, int]:
 
 
 def _court_mentions(text: str, lo: int, hi: int) -> list[tuple[int, int]]:
-    """Spans dos tribunais citados entre ``lo`` e ``hi``.
-
-    "Superior Tribunal de Justiça (STJ)" conta como uma menção só.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    lo, hi : int
-        Janela de busca.
-
-    Returns
-    -------
-    list of tuple of (int, int)
-        Spans ``(início, fim)`` em ordem.
-    """
+    """Tribunais citados; "Superior Tribunal de Justiça (STJ)" conta como um só."""
     return [(m.start(), m.end()) for m in _COURT_FULL_RE.finditer(text, lo, hi) if COURT_RE.search(m.group())]
 
 
 def known_relator(text: str, known: list[frozenset]) -> tuple[int, int, str] | None:
-    """Primeiro nome, sem pista de relatoria, que é de um relator da base.
+    """(início, fim, nome) do primeiro nome, sem pista, que é de um relator da base.
 
-    "TSE, 2017, Gilmar Mendes": todas as palavras do nome (2+) pertencem ao mesmo relator do
-    acervo. Em cada sequência de palavras com maiúscula, tenta os trechos a partir de cada
-    palavra, do mais longo ao mais curto. A lista vem da base recebida, não de um catálogo.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo ou trecho de citação.
-    known : list of frozenset
-        Tokens de nome (``normalize.name_tokens``) de cada relator da base.
-
-    Returns
-    -------
-    tuple of (int, int, str) or None
-        ``(início, fim, nome)``, ou ``None`` se nenhum nome é de relator da base.
+    "TSE, 2017, Gilmar Mendes": todas as palavras do nome (2+) pertencem ao
+    mesmo relator do acervo. A lista vem da base, não de um catálogo.
     """
     if not known:
         return None
@@ -1780,24 +1121,8 @@ def known_relator(text: str, known: list[frozenset]) -> tuple[int, int, str] | N
 
 
 def _relators(text: str, known: list[frozenset] = ()) -> list[tuple[int, int]]:
-    """Spans de todos os relatores citados no texto.
-
-    Cada span inclui a pista, o nome e um "(relator)" logo depois ("Min. Rel. Fulano
-    (relator)"); com ``known``, entram também os nomes sem pista que são de relatores da base
-    (:func:`known_relator`) e não se sobrepõem aos anteriores.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    known : list of frozenset, optional
-        Tokens de nome dos relatores da base.
-
-    Returns
-    -------
-    list of tuple of (int, int)
-        Spans ``(início, fim)`` em ordem.
-    """
+    """Spans "pista + nome" de todos os relatores citados ("Min. Rel. Fulano (relator)"),
+    mais nomes sem pista que são de relatores da base."""
     spans = []
     for cue in _REL_CUE.finditer(text):
         if spans and cue.start() < spans[-1][1]:
@@ -1818,29 +1143,6 @@ def _relators(text: str, known: list[frozenset] = ()) -> list[tuple[int, int]]:
 
 
 def _descriptive_anchors(text: str, taken: list[tuple[int, int]], known: list[frozenset] = ()) -> list[dict]:
-    """Âncoras descritivas: tribunal, ano e relator na mesma oração, em qualquer ordem.
-
-    Para cada relator (:func:`_relators`), procura na oração (:func:`_clause`, sem atravessar
-    outro relator) o tribunal e o ano livres mais próximos; o span vai do primeiro ao último
-    dos três (no máximo 220 caracteres) e ganha à esquerda o descritor ("julgado do", "aresto
-    relatado pelo"; :func:`_descriptor_start`). Fica de fora o trecho com número de processo
-    (é atributo de citação numerada) e o rabo de citação numerada anterior ("REsp 1/SP,
-    Terceira Turma do STJ, Rel. Min. …").
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    taken : list of tuple of (int, int)
-        Spans já tomados; recebe os novos.
-    known : list of frozenset, optional
-        Tokens de nome dos relatores da base (acham relatores sem pista).
-
-    Returns
-    -------
-    list of dict
-        Citações novas da família ``julgados_descritivos`` (tipo ``jurisprudencia``).
-    """
     found = []
     relators = _relators(text, known)
     for rel_start, rel_end in relators:
@@ -1852,18 +1154,6 @@ def _descriptive_anchors(text: str, taken: list[tuple[int, int]], known: list[fr
         hi = min([hi] + [s for s, e in relators if s >= rel_end])
 
         def free(spans):
-            """Filtra os spans que não se sobrepõem aos já tomados.
-
-            Parameters
-            ----------
-            spans : list of tuple of (int, int)
-                Spans candidatos.
-
-            Returns
-            -------
-            list of tuple of (int, int)
-                Os spans livres.
-            """
             return [s for s in spans if not _overlaps(*s, taken)]
 
         courts = free(_court_mentions(text, lo, hi))
@@ -1872,18 +1162,6 @@ def _descriptive_anchors(text: str, taken: list[tuple[int, int]], known: list[fr
             continue
 
         def dist(s):
-            """Distância entre um span e o relator (0 se encostam ou se sobrepõem).
-
-            Parameters
-            ----------
-            s : tuple of (int, int)
-                Span do tribunal ou do ano.
-
-            Returns
-            -------
-            int
-                Caracteres entre o span e o relator.
-            """
             return max(0, rel_start - s[1], s[0] - rel_end)
 
         court, year = min(courts, key=dist), min(years, key=dist)
@@ -1909,26 +1187,7 @@ def _descriptive_anchors(text: str, taken: list[tuple[int, int]], known: list[fr
 
 
 def _descriptor_start(text: str, start: int, floor: int) -> int:
-    """Recua o início da descritiva para incluir o descritor à esquerda.
-
-    Inclui conectores, descritores ("julgado", "aresto relatado pelo"), classes e palavras
-    jurídicas ("Reclamação") nos 60 caracteres anteriores, parando em vírgula, ponto e
-    vírgula, dois-pontos ou ")"; o início nunca fica num conector.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    start : int
-        Início atual da descritiva.
-    floor : int
-        Limite à esquerda (início da oração).
-
-    Returns
-    -------
-    int
-        Novo início.
-    """
+    """Inclui 'julgado do', 'Reclamação (', 'aresto relatado pelo' à esquerda."""
     tokens = list(_TOKEN.finditer(text, max(floor, start - 60), start))
     new_start = start
     for tok in reversed(tokens):
@@ -1950,25 +1209,10 @@ def _descriptor_start(text: str, start: int, floor: int) -> int:
 
 
 def find_anchors(text: str, citations: list[dict], known_relators: list[frozenset] = ()) -> list[dict]:
-    """Acha, com as âncoras gerais, citações em formas que o regex não conhece.
+    """Citações novas (não sobrepostas às do regex), em ordem de posição.
 
-    Roda, nesta ordem, as âncoras de súmula, artigo, processo e descritiva; cada uma só
-    acrescenta spans que não se sobrepõem aos do regex nem aos das anteriores.
-
-    Parameters
-    ----------
-    text : str
-        Texto limpo.
-    citations : list of dict
-        Citações do regex, já alargadas (:func:`expand_spans`).
-    known_relators : list of frozenset, optional
-        Tokens de nome dos relatores da base; permitem achar descritivas sem pista de
-        relatoria.
-
-    Returns
-    -------
-    list of dict
-        Só as citações novas, em ordem de posição, com ``origem="ancora"``.
+    `known_relators` (tokens dos relatores da base) permite achar descritivas
+    sem pista de relatoria.
     """
     taken = [(c["inicio"], c["fim"]) for c in citations]
     new = []
