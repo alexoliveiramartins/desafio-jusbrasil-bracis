@@ -1,0 +1,81 @@
+{
+  "descricao": "Modelos da camada de NLP opcional (src/nlp.py). A versão só com regras não usa modelo nenhum. \"modelo\" é o principal; \"conjunto\" lista os modelos extras (união para citações novas, acordo para normalizar). CACA_ENSEMBLE=0 usa só o principal.",
+  "modelo": {
+    "hf_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+    "revisao": "a06e946bb6b655725eafa393f4a9745d460374c9",
+    "arquivo": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+    "bytes": 2497281120,
+    "url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    "licenca": "apache-2.0",
+    "gated": false,
+    "fine_tune": false,
+    "quantizacao": "GGUF Q4_K_M (quantização publicada no próprio repositório; pesos sem alteração nossa)",
+    "modelo_base": {
+      "hf_repo": "Qwen/Qwen3-4B-Instruct-2507",
+      "revisao": "cdbee75f17c01a7cc42f958dc650907174af0554",
+      "licenca": "apache-2.0"
+    }
+  },
+  "runtime": {
+    "motor": "ollama",
+    "versao": "0.33.2",
+    "imagem_cuda": "ollama/ollama:0.33.2@sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2",
+    "imagem_rocm": "ollama/ollama:0.33.2-rocm@sha256:eaddb04a9e21fa3950c279792f04752db7addeebc5e9f314d9abc0dda33bca24",
+    "modelfile": "docker/nlp/Modelfile",
+    "nome_local": "caca-nlp",
+    "paralelismo": 1,
+    "variantes": {
+      "nvidia": {
+        "build": "docker build -t caca-alucinacoes .",
+        "run": "--gpus all"
+      },
+      "amd": {
+        "build": "docker build --build-arg GPU=amd -t caca-alucinacoes .",
+        "run": "--device /dev/kfd --device /dev/dri"
+      },
+      "cpu": {
+        "build": "docker build --build-arg GPU=cpu -t caca-alucinacoes .",
+        "run": ""
+      }
+    },
+    "modelos_carregados": "2 por padrão (CACA_MAX_LOADED_MODELS); ~10 GB de VRAM com os dois"
+  },
+  "decodificacao": {
+    "temperature": 0,
+    "seed": 42,
+    "num_ctx": 8192,
+    "num_predict": 4096,
+    "think": false,
+    "saida": "JSON restrito por schema (format do Ollama)",
+    "observacao": "parâmetros determinísticos (gulosa, seed fixa, um pedido por vez); o texto gerado na GPU pode variar entre execuções por não determinismo numérico (medido: 64% das respostas idênticas; nota variou no máximo +0,004)"
+  },
+  "execucao": {
+    "rede": "nenhuma chamada externa em runtime: o servidor escuta só em 127.0.0.1 dentro do contêiner",
+    "pesos": "montados em /models (baixados antes com tools/download_models.py e conferidos pelo sha256)",
+    "base": "montada em /data/ref/desafio1_bracis.db (CACA_DB)",
+    "fallback": "sem pesos, hash divergente, servidor fora do ar ou orçamento de tempo excedido: saída só com as regras",
+    "tempo": "~9 s/doc com um modelo e ~20 s/doc com o conjunto numa GPU de 16 GB; orçamento: média <= 40 s/doc"
+  },
+  "conjunto": [
+    {
+      "hf_repo": "Qwen/Qwen3-8B-GGUF",
+      "revisao": "7c41481f57cb95916b40956ab2f0b139b296d974",
+      "arquivo": "Qwen3-8B-Q4_K_M.gguf",
+      "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+      "bytes": 5027783488,
+      "url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q4_K_M.gguf",
+      "licenca": "apache-2.0",
+      "gated": false,
+      "fine_tune": false,
+      "quantizacao": "GGUF Q4_K_M (quantização oficial da Qwen; pesos sem alteração nossa)",
+      "modelo_base": {
+        "hf_repo": "Qwen/Qwen3-8B",
+        "revisao": "b968826d9c46dd6066d109eabc6255188de91218",
+        "licenca": "apache-2.0"
+      },
+      "modelfile": "docker/nlp/Modelfile.qwen3-8b",
+      "nome_local": "caca-nlp-8b"
+    }
+  ]
+}
