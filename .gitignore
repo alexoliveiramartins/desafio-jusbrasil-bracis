@@ -6,26 +6,4 @@ venv/
 
 # Saídas geradas (regeneráveis)
 resultados/
-relatorios/
 submission.csv
-data/synthetic/
-data/stress/
-.cache/
-
-# Current Kaggle snapshot and local experiment outputs
-data/current/
-runs/
-reports/
-
-# Caches de ferramentas
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.env
-tempCodeRunnerFile.py
-
-# Pesos do modelo (baixados com tools/download_models.py; não vão para o git nem para a imagem)
-modelos/
-# Saídas e pacotes de submissão (regeneráveis)
-saida/
-saidas.zip
